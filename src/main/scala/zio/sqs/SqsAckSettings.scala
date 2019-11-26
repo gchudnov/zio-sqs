@@ -1,6 +1,9 @@
 package zio.sqs
 
-case class SqsStreamSettings(
+import zio._
+import zio.duration._
+
+case class SqsAckSettings(
   attributeNames: List[String] = Nil,
   maxNumberOfMessages: Int = 1,
   messageAttributeNames: List[String] = Nil,
