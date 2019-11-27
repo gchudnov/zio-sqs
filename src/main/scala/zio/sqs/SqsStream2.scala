@@ -9,6 +9,10 @@ import scala.jdk.CollectionConverters._
 
 object SqsStream2 {
 
+  trait Ack
+  case object Ignore extends Ack
+  case object Delete extends Ack
+
   def apply(
     client: SqsAsyncClient,
     queueUrl: String,
@@ -47,6 +51,11 @@ object SqsStream2 {
       .mapM(msg => IO.when(settings.autoDelete)(deleteMessage(client, queueUrl, msg)).as(msg))
   }
 
+  def ack(client: SqsAsyncClient,
+          queueUrl: String,
+          settings: SqsAckSettings = SqsAckSettings()): Stream[Throwable, (Message, Ack)] = {
+    ???
+  }
 
 
   def deleteMessage(client: SqsAsyncClient, queueUrl: String, msg: Message): Task[Unit] =

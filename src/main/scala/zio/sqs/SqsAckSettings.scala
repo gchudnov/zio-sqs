@@ -4,6 +4,6 @@ import zio._
 import zio.duration._
 
 case class SqsAckSettings(
-  batchSize: Int,
-  duration: Duration
+  batchSize: Int = 10,
+  duration: Duration = 1.second
 )
