@@ -57,23 +57,23 @@ object SqsStream2 {
     client: SqsAsyncClient,
     queueUrl: String,
     settings: SqsAckSettings = SqsAckSettings()
-  ): Stream[Throwable, (Message, Ack)] = {
+  ) = {
 
     import ZioSyntax._
 
     val items: List[(Message, Ack)] = List.empty[(Message, Ack)] // e.g. IF we have this stream....
 
-    Stream
+    Stream.managed(Stream
       .fromIterable(items)
       .partition3({
         case (m, Delete)           => ZIO.succeed(Partition1[Message, Message, Message](m))
         case (m, Ignore)           => ZIO.succeed(Partition2[Message, Message, Message](m))
         case (m, ChangeVisibility) => ZIO.succeed(Partition3[Message, Message, Message](m))
-      })
+      }))
       .flatMap({
         case (deletes, ignores, changeVisibilities) =>
           deletes
-            .aggregateAsyncWithin(Sink.collectAllN(settings.batchSize), Schedule.spaced(settings.duration))
+            .aggregateAsyncWithin(Sink.collectAllN[Message](settings.batchSize), Schedule.spaced(settings.duration))
             .map(buildDeleteRequest(queueUrl, _))
             .mapMPar(settings.parallelism)(req => {
               Task.effectAsync[List[Message]] { cb =>
@@ -92,7 +92,9 @@ object SqsStream2 {
                     }
                   })
               }
-            })
+            })//.mapConcat(identity)
+
+
 
       })
     // (m, a) -> [ split in 3 streams -> commit each stream separately -> join streams and have one stream as an output ]
