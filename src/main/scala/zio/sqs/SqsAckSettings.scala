@@ -1,10 +1,9 @@
 package zio.sqs
 
-import zio._
 import zio.duration._
 
 case class SqsAckSettings(
-  batchSize: Int = 10,
+  batchSize: Long = 10L,
   duration: Duration = 1.second,
   parallelism: Int = 16
 )

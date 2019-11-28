@@ -61,7 +61,7 @@ object SqsStream2 {
 
     import ZioSyntax._
 
-    val items: List[(Message, Ack)] = List.empty[(Message, Ack)] // e.g. IF we have this stream....
+    val items: List[(Message, Ack)] = List.empty[(Message, Ack)] // e.g. IF we have this stream - connect 'apply' and 'ack'
 
     Stream.managed(Stream
       .fromIterable(items)
@@ -76,7 +76,7 @@ object SqsStream2 {
             .aggregateAsyncWithin(Sink.collectAllN[Message](settings.batchSize), Schedule.spaced(settings.duration))
             .map(buildDeleteRequest(queueUrl, _))
             .mapMPar(settings.parallelism)(req => {
-              Task.effectAsync[List[Message]] { cb =>
+              Task.effectAsync[List[String]] { cb =>
                 client
                   .deleteMessageBatch(req)
                   .handle[Unit]((res, err) => {
@@ -85,7 +85,7 @@ object SqsStream2 {
                       case null =>
                         res match {
                           case rs if rs.failed().isEmpty =>
-                            cb(IO.succeed(rs.successful().asScala.toList))
+                            cb(IO.succeed(rs.successful().asScala.map(_.id()).toList))
                           case rs =>
                             cb(IO.fail(new RuntimeException("Failed to delete some messages.")))
                         }
@@ -94,6 +94,7 @@ object SqsStream2 {
               }
             })//.mapConcat(identity)
 
+        DeleteMessageBatchResponse
 
 
       })
@@ -117,6 +118,10 @@ object SqsStream2 {
       .queueUrl(queueUrl)
       .entries(entries.asJava)
       .build()
+  }
+
+  def runDeleteRequest() = {
+
   }
 
   def deleteMessage(client: SqsAsyncClient, queueUrl: String, msg: Message): Task[Unit] =
