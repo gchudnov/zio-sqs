@@ -76,13 +76,12 @@ object SqsStream2 {
   }
 
   private def buildDeleteRequest(queueUrl: String, ms: List[Message]): DeleteMessageBatchRequest = {
-    val entries = ms.map(
-      m =>
-        DeleteMessageBatchRequestEntry
-          .builder()
-          .id(m.messageId())
-          .receiptHandle(m.receiptHandle())
-          .build()
+    val entries = ms.map(m =>
+      DeleteMessageBatchRequestEntry
+        .builder()
+        .id(m.messageId())
+        .receiptHandle(m.receiptHandle())
+        .build()
     )
 
     DeleteMessageBatchRequest
@@ -96,12 +95,12 @@ object SqsStream2 {
     Task.effectAsync[List[Message]] { cb =>
       client
         .receiveMessage(req)
-        .handle[Unit]((result, err) => {
+        .handle[Unit] { (result, err) =>
           err match {
             case null => cb(IO.succeed(result.messages.asScala.toList))
             case ex   => cb(IO.fail(ex))
           }
-        })
+        }
       ()
     }
 
@@ -109,7 +108,7 @@ object SqsStream2 {
     Task.effectAsync[List[MessageId]] { cb =>
       client
         .deleteMessageBatch(req)
-        .handle[Unit]((res, err) => {
+        .handle[Unit] { (res, err) =>
           err match {
             case null =>
               res match {
@@ -120,7 +119,7 @@ object SqsStream2 {
               }
             case ex => cb(IO.fail(ex))
           }
-        })
+        }
       ()
     }
 }
