@@ -31,28 +31,13 @@ object SqsStream2 {
       .waitTimeSeconds(settings.waitTimeSeconds)
 
     Stream
-      .fromEffect({
-        Task.effect(requestBuilder)
-      })
+      .fromEffect(Task.effect(requestBuilder))
       .forever
       .map(_.build())
-      .mapMPar(settings.parallelism)(req => {
-        Task.effectAsync[List[Message]] { cb =>
-          client
-            .receiveMessage(req)
-            .handle[Unit]((result, err) => {
-              err match {
-                case null => cb(IO.succeed(result.messages.asScala.toList))
-                case ex   => cb(IO.fail(ex))
-              }
-            })
-          ()
-        }
-      })
+      .mapMPar(settings.parallelism)(runReceiveMessageRequest(client, _))
       .takeWhile(_.nonEmpty || !settings.stopWhenQueueEmpty)
       .mapConcat(identity)
       .buffer(settings.parallelism * settings.maxNumberOfMessages)
-      .mapM(msg => IO.when(settings.autoDelete)(deleteMessage(client, queueUrl, msg)).as(msg))
   }
 
   def ack(
@@ -63,24 +48,26 @@ object SqsStream2 {
 
     import ZioSyntax._
 
-    val items: List[(Message, Ack)] = List.empty[(Message, Ack)] // e.g. IF we have this stream - connect 'apply' and 'ack'
+    val items
+      : List[(Message, Ack)] = List.empty[(Message, Ack)] // e.g. IF we have this stream - connect 'apply' and 'ack'
 
-    Stream.managed(Stream
-      .fromIterable(items)
-      .partition3({
-        case (m, Delete)           => ZIO.succeed(Partition1[Message, Message, Message](m))
-        case (m, Ignore)           => ZIO.succeed(Partition2[Message, Message, Message](m))
-        case (m, ChangeVisibility) => ZIO.succeed(Partition3[Message, Message, Message](m))
-      }))
+    Stream
+      .managed(
+        Stream
+          .fromIterable(items)
+          .partition3({
+            case (m, Delete)           => ZIO.succeed(Partition1[Message, Message, Message](m))
+            case (m, Ignore)           => ZIO.succeed(Partition2[Message, Message, Message](m))
+            case (m, ChangeVisibility) => ZIO.succeed(Partition3[Message, Message, Message](m))
+          })
+      )
       .flatMap({
         case (deletes, ignores, changeVisibilities) =>
           deletes
             .aggregateAsyncWithin(Sink.collectAllN[Message](settings.batchSize), Schedule.spaced(settings.duration))
             .map(buildDeleteRequest(queueUrl, _))
-            .mapMPar(settings.parallelism)(req => {
-              runDeleteRequest(client, req)
-            })//.mapConcat(identity)
-
+            .mapMPar(settings.parallelism)(runDeleteRequest(client, _))
+        //.mapConcat(identity)
 
       })
     // (m, a) -> [ split in 3 streams -> commit each stream separately -> join streams and have one stream as an output ]
@@ -105,13 +92,25 @@ object SqsStream2 {
       .build()
   }
 
-  private def runDeleteRequest(client: SqsAsyncClient, req: DeleteMessageBatchRequest): Task[List[MessageId]] = {
+  private def runReceiveMessageRequest(client: SqsAsyncClient, req: ReceiveMessageRequest): Task[List[Message]] =
+    Task.effectAsync[List[Message]] { cb =>
+      client
+        .receiveMessage(req)
+        .handle[Unit]((result, err) => {
+          err match {
+            case null => cb(IO.succeed(result.messages.asScala.toList))
+            case ex   => cb(IO.fail(ex))
+          }
+        })
+      ()
+    }
+
+  private def runDeleteRequest(client: SqsAsyncClient, req: DeleteMessageBatchRequest): Task[List[MessageId]] =
     Task.effectAsync[List[MessageId]] { cb =>
       client
         .deleteMessageBatch(req)
         .handle[Unit]((res, err) => {
           err match {
-            case ex => cb(IO.fail(ex))
             case null =>
               res match {
                 case rs if rs.failed().isEmpty =>
@@ -119,25 +118,7 @@ object SqsStream2 {
                 case rs =>
                   cb(IO.fail(new RuntimeException("Failed to delete some messages.")))
               }
-          }
-        })
-    }
-  }
-
-  def deleteMessage(client: SqsAsyncClient, queueUrl: String, msg: Message): Task[Unit] =
-    Task.effectAsync[Unit] { cb =>
-      client
-        .deleteMessage(
-          DeleteMessageRequest
-            .builder()
-            .queueUrl(queueUrl)
-            .receiptHandle(msg.receiptHandle())
-            .build()
-        )
-        .handle[Unit]((_, err) => {
-          err match {
-            case null => cb(IO.unit)
-            case ex   => cb(IO.fail(ex))
+            case ex => cb(IO.fail(ex))
           }
         })
       ()
