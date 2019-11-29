@@ -1,7 +1,7 @@
 package zio.sqs
 
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
-import software.amazon.awssdk.services.sqs.model.{ DeleteMessageBatchRequest, _ }
+import software.amazon.awssdk.services.sqs.model.{ DeleteMessageBatchRequest, ChangeMessageVisibilityBatchRequest, _ }
 import zio.stream.{ Sink, Stream }
 import zio.{ IO, Schedule, Task, ZIO }
 
@@ -59,20 +59,27 @@ object SqsStream2 {
             case (m, Delete)           => ZIO.succeed(Partition1[Message, Message, Message](m))
             case (m, Ignore)           => ZIO.succeed(Partition2[Message, Message, Message](m))
             case (m, ChangeVisibility) => ZIO.succeed(Partition3[Message, Message, Message](m))
+            case (_, _)                => ZIO.fail[Throwable](new RuntimeException("invalid (message, action)"))
           })
       )
       .flatMap({
         case (deletes, ignores, changeVisibilities) =>
-          deletes
+          val deleteResults = deletes
             .aggregateAsyncWithin(Sink.collectAllN[Message](settings.batchSize), Schedule.spaced(settings.duration))
             .map(buildDeleteRequest(queueUrl, _))
             .mapMPar(settings.parallelism)(runDeleteRequest(client, _))
-        //.mapConcat(identity)
+            .mapConcat(identity)
 
+          val ignoreResults = ignores.map(it => MessageId(it.messageId()))
+
+          val changeVisibilityResults = changeVisibilities
+            .aggregateAsyncWithin(Sink.collectAllN[Message](settings.batchSize), Schedule.spaced(settings.duration))
+            .map(buildChangeVisibilityRequest(queueUrl, _))
+            .mapMPar(settings.parallelism)(runChangeVisibilityRequest(client, _))
+            .mapConcat(identity)
+
+          deleteResults ++ ignoreResults ++ changeVisibilityResults
       })
-    // (m, a) -> [ split in 3 streams -> commit each stream separately -> join streams and have one stream as an output ]
-    // [] -- implement as a single operator
-
   }
 
   private def buildDeleteRequest(queueUrl: String, ms: List[Message]): DeleteMessageBatchRequest = {
@@ -85,6 +92,23 @@ object SqsStream2 {
     )
 
     DeleteMessageBatchRequest
+      .builder()
+      .queueUrl(queueUrl)
+      .entries(entries.asJava)
+      .build()
+  }
+
+  private def buildChangeVisibilityRequest(queueUrl: String, ms: List[Message]): ChangeMessageVisibilityBatchRequest = {
+    val entries = ms.map(m =>
+      ChangeMessageVisibilityBatchRequestEntry
+        .builder()
+        .id(m.messageId())
+        .receiptHandle(m.receiptHandle())
+        .visibilityTimeout(30) // TODO: set in case class
+        .build()
+    )
+
+    ChangeMessageVisibilityBatchRequest
       .builder()
       .queueUrl(queueUrl)
       .entries(entries.asJava)
@@ -116,6 +140,28 @@ object SqsStream2 {
                   cb(IO.succeed(rs.successful().asScala.map(it => MessageId(it.id())).toList))
                 case rs =>
                   cb(IO.fail(new RuntimeException("Failed to delete some messages.")))
+              }
+            case ex => cb(IO.fail(ex))
+          }
+        }
+      ()
+    }
+
+  private def runChangeVisibilityRequest(
+    client: SqsAsyncClient,
+    req: ChangeMessageVisibilityBatchRequest
+  ): Task[List[MessageId]] =
+    Task.effectAsync[List[MessageId]] { cb =>
+      client
+        .changeMessageVisibilityBatch(req)
+        .handle[Unit] { (res, err) =>
+          err match {
+            case null =>
+              res match {
+                case rs if rs.failed().isEmpty =>
+                  cb(IO.succeed(rs.successful().asScala.map(it => MessageId(it.id())).toList))
+                case rs =>
+                  cb(IO.fail(new RuntimeException("Failed to change visibility for some messages.")))
               }
             case ex => cb(IO.fail(ex))
           }
