@@ -14,6 +14,8 @@ object SqsStream2 {
   case object Ignore           extends Ack
   case object ChangeVisibility extends Ack
 
+  final case class MessageId(value: String)
+
   def apply(
     client: SqsAsyncClient,
     queueUrl: String,
@@ -76,25 +78,8 @@ object SqsStream2 {
             .aggregateAsyncWithin(Sink.collectAllN[Message](settings.batchSize), Schedule.spaced(settings.duration))
             .map(buildDeleteRequest(queueUrl, _))
             .mapMPar(settings.parallelism)(req => {
-              Task.effectAsync[List[String]] { cb =>
-                client
-                  .deleteMessageBatch(req)
-                  .handle[Unit]((res, err) => {
-                    err match {
-                      case ex => cb(IO.fail(ex))
-                      case null =>
-                        res match {
-                          case rs if rs.failed().isEmpty =>
-                            cb(IO.succeed(rs.successful().asScala.map(_.id()).toList))
-                          case rs =>
-                            cb(IO.fail(new RuntimeException("Failed to delete some messages.")))
-                        }
-                    }
-                  })
-              }
+              runDeleteRequest(client, req)
             })//.mapConcat(identity)
-
-        DeleteMessageBatchResponse
 
 
       })
@@ -120,8 +105,23 @@ object SqsStream2 {
       .build()
   }
 
-  def runDeleteRequest() = {
-
+  private def runDeleteRequest(client: SqsAsyncClient, req: DeleteMessageBatchRequest): Task[List[MessageId]] = {
+    Task.effectAsync[List[MessageId]] { cb =>
+      client
+        .deleteMessageBatch(req)
+        .handle[Unit]((res, err) => {
+          err match {
+            case ex => cb(IO.fail(ex))
+            case null =>
+              res match {
+                case rs if rs.failed().isEmpty =>
+                  cb(IO.succeed(rs.successful().asScala.map(it => MessageId(it.id())).toList))
+                case rs =>
+                  cb(IO.fail(new RuntimeException("Failed to delete some messages.")))
+              }
+          }
+        })
+    }
   }
 
   def deleteMessage(client: SqsAsyncClient, queueUrl: String, msg: Message): Task[Unit] =
