@@ -1,8 +1,9 @@
 package zio.sqs
 
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
-import software.amazon.awssdk.services.sqs.model.{ DeleteMessageBatchRequest, ChangeMessageVisibilityBatchRequest, _ }
-import zio.stream.{ Sink, Stream }
+import software.amazon.awssdk.services.sqs.model.{ ChangeMessageVisibilityBatchRequest, DeleteMessageBatchRequest, _ }
+import zio.clock.Clock
+import zio.stream.{ Sink, Stream, ZStream }
 import zio.{ IO, Schedule, Task, ZIO }
 
 import scala.jdk.CollectionConverters._
@@ -40,21 +41,16 @@ object SqsStream2 {
       .buffer(settings.parallelism * settings.maxNumberOfMessages)
   }
 
-  def ack(
+  def withAckStream(
     client: SqsAsyncClient,
     queueUrl: String,
     settings: SqsAckSettings = SqsAckSettings()
-  ) = {
-
+  )(acks: Stream[Throwable, (Message, Ack)]): ZStream[Clock, Throwable, MessageId] = {
     import ZioSyntax._
-
-    val items
-      : List[(Message, Ack)] = List.empty[(Message, Ack)] // e.g. IF we have this stream - connect 'apply' and 'ack'
 
     Stream
       .managed(
-        Stream
-          .fromIterable(items)
+        acks
           .partition3({
             case (m, Delete)           => ZIO.succeed(Partition1[Message, Message, Message](m))
             case (m, Ignore)           => ZIO.succeed(Partition2[Message, Message, Message](m))
