@@ -56,10 +56,11 @@ object SqsPublisher {
     client: SqsAsyncClient,
     queueUrl: String,
     settings: SqsPublisherSettings = SqsPublisherSettings()
-  )(ms: Stream[Throwable, Event]): ZStream[Clock, Throwable, List[MessageId]] = {
+  )(ms: Stream[Throwable, Event]): ZStream[Clock, Throwable, MessageId] = {
     ms.aggregateAsyncWithin(Sink.collectAllN[Event](settings.batchSize), Schedule.spaced(settings.duration))
       .map(buildSendMessageBatchRequest(queueUrl, _))
       .mapMPar(settings.parallelism)(runSendMessageBatchRequest(client, _))
+      .mapConcat(identity)
   }
 
   private def buildSendMessageBatchRequest(queueUrl: String, ms: List[Event]): SendMessageBatchRequest = {
