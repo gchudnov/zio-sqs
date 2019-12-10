@@ -59,9 +59,10 @@ object SqsPublisher {
     settings: SqsPublisherSettings
   )(ms: Stream[Throwable, Event]): ZStream[Clock, Throwable, MessageId] = {
     val ec = buildSendExecutionContext(settings.parallelism)
-    ms.aggregateAsyncWithin(Sink.collectAllN[Event](settings.batchSize), Schedule.spaced(settings.duration))
+    //ms.aggregateAsyncWithin(Sink.collectAllN[Event](settings.batchSize), Schedule.spaced(settings.duration))
+    ms.aggregate(Sink.collectAllN[Event](settings.batchSize))
       .map(buildSendMessageBatchRequest(queueUrl, _))
-      .mapMParUnordered(settings.parallelism)(runSendMessageBatchRequest(client, ec, _))
+      .mapMParUnordered(settings.parallelism)(runSendMessageBatchRequest(client, _))
       .mapConcat(identity)
   }
 
@@ -85,7 +86,7 @@ object SqsPublisher {
       .build()
   }
 
-  def runSendMessageBatchRequest(client: SqsAsyncClient, ec: ExecutionContext, req: SendMessageBatchRequest): Task[List[MessageId]] =
+  def runSendMessageBatchRequest(client: SqsAsyncClient, req: SendMessageBatchRequest): Task[List[MessageId]] =
     Task.effectAsync[List[MessageId]]({ cb =>
       client
         .sendMessageBatch(req)
@@ -102,11 +103,9 @@ object SqsPublisher {
           }
         }
       ()
-    }).on(ec)
+    })
 
   def buildSendExecutionContext(parallelism: Int): ExecutionContextExecutor = ExecutionContext.fromExecutor(
-
-    scala.concurrent.ExecutionContext.global
     new java.util.concurrent.ForkJoinPool(parallelism)
   )
 
