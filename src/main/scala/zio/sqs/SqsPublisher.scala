@@ -3,10 +3,11 @@ package zio.sqs
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
 import software.amazon.awssdk.services.sqs.model._
 import zio.clock.Clock
-import zio.sqs.SqsStream2.{MessageId}
+import zio.sqs.SqsStream2.MessageId
 import zio.stream.{Sink, Stream, ZStream}
 import zio.{IO, Schedule, Task}
 
+import scala.concurrent.{ExecutionContext, ExecutionContextExecutor}
 import scala.jdk.CollectionConverters._
 
 object SqsPublisher {
@@ -55,11 +56,12 @@ object SqsPublisher {
   def sendStream(
     client: SqsAsyncClient,
     queueUrl: String,
-    settings: SqsPublisherSettings = SqsPublisherSettings()
+    settings: SqsPublisherSettings
   )(ms: Stream[Throwable, Event]): ZStream[Clock, Throwable, MessageId] = {
+    val ec = buildSendExecutionContext(settings.parallelism)
     ms.aggregateAsyncWithin(Sink.collectAllN[Event](settings.batchSize), Schedule.spaced(settings.duration))
       .map(buildSendMessageBatchRequest(queueUrl, _))
-      .mapMPar(settings.parallelism)(runSendMessageBatchRequest(client, _))
+      .mapMParUnordered(settings.parallelism)(runSendMessageBatchRequest(client, ec, _))
       .mapConcat(identity)
   }
 
@@ -83,8 +85,8 @@ object SqsPublisher {
       .build()
   }
 
-  def runSendMessageBatchRequest(client: SqsAsyncClient, req: SendMessageBatchRequest): Task[List[MessageId]] =
-    Task.effectAsync[List[MessageId]] { cb =>
+  def runSendMessageBatchRequest(client: SqsAsyncClient, ec: ExecutionContext, req: SendMessageBatchRequest): Task[List[MessageId]] =
+    Task.effectAsync[List[MessageId]]({ cb =>
       client
         .sendMessageBatch(req)
         .handle[Unit] { (res, err) =>
@@ -100,5 +102,12 @@ object SqsPublisher {
           }
         }
       ()
-    }
+    }).on(ec)
+
+  def buildSendExecutionContext(parallelism: Int): ExecutionContextExecutor = ExecutionContext.fromExecutor(
+
+    scala.concurrent.ExecutionContext.global
+    new java.util.concurrent.ForkJoinPool(parallelism)
+  )
+
 }
