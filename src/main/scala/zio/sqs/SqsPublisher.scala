@@ -1,5 +1,9 @@
 package zio.sqs
 
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+
+import com.codahale.metrics.{Counter, MetricRegistry, Timer}
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
 import software.amazon.awssdk.services.sqs.model._
 import zio.clock.Clock
@@ -56,13 +60,14 @@ object SqsPublisher {
   def sendStream(
     client: SqsAsyncClient,
     queueUrl: String,
-    settings: SqsPublisherSettings
+    settings: SqsPublisherSettings,
+    mr: MetricRegistry
   )(ms: Stream[Throwable, Event]): ZStream[Clock, Throwable, MessageId] = {
-    val ec = buildSendExecutionContext(settings.parallelism)
-    //ms.aggregateAsyncWithin(Sink.collectAllN[Event](settings.batchSize), Schedule.spaced(settings.duration))
-    ms.aggregate(Sink.collectAllN[Event](settings.batchSize))
+    val reqTimer: Timer = mr.timer("request-latency")
+
+    ms.aggregateAsyncWithin(Sink.collectAllN[Event](settings.batchSize), Schedule.spaced(settings.duration))
       .map(buildSendMessageBatchRequest(queueUrl, _))
-      .mapMParUnordered(settings.parallelism)(runSendMessageBatchRequest(client, _))
+      .mapMParUnordered(settings.parallelism)(runSendMessageBatchRequest(client, reqTimer, _))
       .mapConcat(identity)
   }
 
@@ -86,11 +91,13 @@ object SqsPublisher {
       .build()
   }
 
-  def runSendMessageBatchRequest(client: SqsAsyncClient, req: SendMessageBatchRequest): Task[List[MessageId]] =
+  def runSendMessageBatchRequest(client: SqsAsyncClient, reqTimer: Timer, req: SendMessageBatchRequest): Task[List[MessageId]] =
     Task.effectAsync[List[MessageId]]({ cb =>
+      val c = reqTimer.time()
       client
         .sendMessageBatch(req)
-        .handle[Unit] { (res, err) =>
+        .handleAsync[Unit]((res: SendMessageBatchResponse, err: Throwable) => {
+          reqTimer.update(c.stop(), TimeUnit.NANOSECONDS)
           err match {
             case null =>
               res match {
@@ -101,7 +108,7 @@ object SqsPublisher {
               }
             case ex => cb(IO.fail(ex))
           }
-        }
+        })
       ()
     })
 

@@ -26,6 +26,7 @@ developers := List(
 publishTo := sonatypePublishToBundle.value
 
 libraryDependencies ++= Seq(
+  "io.dropwizard.metrics" % "metrics-core" % "4.1.1",
   "dev.zio"                %% "zio"                     % "1.0.0-RC17",
   "dev.zio"                %% "zio-streams"             % "1.0.0-RC17",
   "software.amazon.awssdk" % "sqs"                      % "2.10.23",
