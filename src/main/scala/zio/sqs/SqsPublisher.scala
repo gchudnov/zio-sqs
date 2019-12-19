@@ -39,13 +39,6 @@ object SqsPublisher {
       ()
     }
 
-  trait Event {
-    def body: String
-    def attributes: Map[String, MessageAttributeValue]
-    def groupId: Option[String]
-    def deduplicationId: Option[String]
-  }
-
   final case class StringEvent(body: String) extends Event {
     override def attributes: Map[String, MessageAttributeValue] = Map.empty[String, MessageAttributeValue]
     override def groupId: Option[String]                        = None
