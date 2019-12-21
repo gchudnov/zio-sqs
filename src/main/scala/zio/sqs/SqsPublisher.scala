@@ -1,12 +1,8 @@
 package zio.sqs
 
-import java.util.function.BiFunction
-
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
 import software.amazon.awssdk.services.sqs.model._
-import zio.clock.Clock
-import zio.stream.{Sink, Stream, ZStream}
-import zio.{IO, Schedule, Task}
+import zio.{IO, Task}
 
 import scala.jdk.CollectionConverters._
 
@@ -39,19 +35,5 @@ object SqsPublisher {
       }
       ()
     }
-
-//  def eventStream(
-//    client: SqsAsyncClient,
-//    queueUrl: String,
-//    settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
-//  )(
-//    ms: Stream[Throwable, SqsPublishEvent]
-//  ): ZStream[Clock, Throwable, SqsPublishErrorOrEvent] =
-//    ms.aggregateAsyncWithin(Sink.collectAllN[SqsPublishEvent](settings.batchSize.toLong), Schedule.spaced(settings.duration))
-//      .map(buildSendMessageBatchRequest(queueUrl, _))
-//      .mapMParUnordered(settings.parallelism)(it => runSendMessageBatchRequest(client, it._1, it._2))
-//      .mapConcat(identity)
-//
-
 
 }

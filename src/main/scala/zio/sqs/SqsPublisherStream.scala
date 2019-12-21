@@ -3,16 +3,29 @@ package zio.sqs
 import java.util.function.BiFunction
 
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
-import software.amazon.awssdk.services.sqs.model.{
-  SendMessageBatchRequest,
-  SendMessageBatchRequestEntry,
-  SendMessageBatchResponse
-}
-import zio.{ IO, Task }
+import software.amazon.awssdk.services.sqs.model.{SendMessageBatchRequest, SendMessageBatchRequestEntry, SendMessageBatchResponse}
+import zio.clock.Clock
+import zio.stream.{Sink, Stream, ZStream}
+import zio.{IO, Schedule, Task}
 
 import scala.jdk.CollectionConverters._
 
 object SqsPublisherStream {
+
+  def sendStream(
+    client: SqsAsyncClient,
+    queueUrl: String,
+    settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
+  )(
+    es: Stream[Throwable, SqsPublishEvent]
+  ): ZStream[Clock, Throwable, SqsPublishErrorOrEvent] =
+    es.aggregateAsyncWithin(
+        Sink.collectAllN[SqsPublishEvent](settings.batchSize.toLong),
+        Schedule.spaced(settings.duration)
+      )
+      .map(buildSendMessageBatchRequest(queueUrl, _))
+      .mapMParUnordered(settings.parallelism)(it => runSendMessageBatchRequest(client, it._1, it._2))
+      .mapConcat(identity)
 
   private[sqs] def buildSendMessageBatchRequest(
     queueUrl: String,

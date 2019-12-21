@@ -21,7 +21,7 @@ object SqsPublishEventErrorSpec
           assert(e.event, equalTo(event))
         },
         test("SqsPublishEventError can be created from BatchResultErrorEntry without message") {
-          val event = SqsPublishEvent("e2")
+          val event    = SqsPublishEvent("e2")
           val errEntry = BatchResultErrorEntry.builder().id("id1").code("code2").senderFault(true).build()
 
           val e = SqsPublishEventError(errEntry, event)

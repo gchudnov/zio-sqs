@@ -1,10 +1,8 @@
 package zio.sqs
 
 import software.amazon.awssdk.services.sqs.model.MessageAttributeValue
-import zio.random.Random
-import zio.sqs.SqsPublishStreamSpecUtil._
 import zio.sqs.ZioSqsMockServer._
-import zio.stream.Sink
+import zio.stream.{ Sink, Stream }
 import zio.test.Assertion._
 import zio.test._
 
@@ -85,17 +83,49 @@ object SqsPublishStreamSpec
           assert(indexedMessages, equalTo(events.zipWithIndex))
         },
         testM("runSendMessageBatchRequest can be executed") {
+          val queueName = "SqsPublishStreamSpec_runSend"
           for {
-            events <- gen.sample.map(_.value.map(SqsPublishEvent(_))).run(Sink.await[List[SqsPublishEvent]])
+            events <- Util
+                       .stringGen(10)
+                       .sample
+                       .map(_.value.map(SqsPublishEvent(_)))
+                       .run(Sink.await[List[SqsPublishEvent]])
             server <- serverResource
             client <- clientResource
             results <- server.use { _ =>
                         client.use { c =>
                           for {
-                            _ <- Utils.createQueue(c, queueName)
+                            _         <- Utils.createQueue(c, queueName)
                             queueUrl  <- Utils.getQueueUrl(c, queueName)
                             (req, ms) = SqsPublisherStream.buildSendMessageBatchRequest(queueUrl, events)
                             results   <- SqsPublisherStream.runSendMessageBatchRequest(c, req, ms)
+                          } yield results
+                        }
+                      }
+          } yield {
+            assert(results.size, equalTo(events.size))
+            assert(results.forall(_.isRight), equalTo(true))
+          }
+        },
+        testM("events can be published using a stream") {
+          val queueName = "SqsPublishStreamSpec_sendStream"
+          for {
+            events <- Util
+                       .stringGen(23)
+                       .sample
+                       .map(_.value.map(SqsPublishEvent(_)))
+                       .run(Sink.await[List[SqsPublishEvent]])
+            server <- serverResource
+            client <- clientResource
+            results <- server.use { _ =>
+                        client.use { c =>
+                          for {
+                            _        <- Utils.createQueue(c, queueName)
+                            queueUrl <- Utils.getQueueUrl(c, queueName)
+                            sendStream = SqsPublisherStream
+                              .sendStream(c, queueUrl, settings = SqsPublisherStreamSettings()) _
+                            results <- sendStream(Stream(events: _*))
+                                        .run(Sink.collectAll[SqsPublishErrorOrEvent]) // replace with .via when ZIO > RC17 is released
                           } yield results
                         }
                       }
@@ -107,8 +137,3 @@ object SqsPublishStreamSpec
       ),
       List(TestAspect.executionStrategy(ExecutionStrategy.Sequential))
     )
-
-object SqsPublishStreamSpecUtil {
-  val queueName: String                         = "SqsPublishStream_TestQueue"
-  val gen: Gen[Random with Sized, List[String]] = Util.stringGen(10)
-}
