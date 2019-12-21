@@ -40,7 +40,7 @@ object SqsPublisherStream {
     (req, indexedMessages)
   }
 
-  private def runSendMessageBatchRequest(
+  private[sqs] def runSendMessageBatchRequest(
     client: SqsAsyncClient,
     req: SendMessageBatchRequest,
     indexedMessages: List[(SqsPublishEvent, Int)]
