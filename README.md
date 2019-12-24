@@ -175,7 +175,7 @@ import software.amazon.awssdk.auth.credentials.{ AwsBasicCredentials, StaticCred
 import software.amazon.awssdk.regions.Region
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
 import zio.{ App, IO, Task, UIO, ZIO }
-import zio.sqs.{ SqsPublisher, SqsStream, SqsStreamSettings, Utils }
+import zio.sqs.{ SqsPublisher, SqsStream, SqsStreamSettings, SqsUtils }
 
 object TestApp extends App {
 
@@ -191,8 +191,8 @@ object TestApp extends App {
                    .build()
                }
       queueName = "TestQueue"
-      _         <- Utils.createQueue(client, queueName)
-      queueUrl  <- Utils.getQueueUrl(client, queueName)
+      _         <- SqsUtils.createQueue(client, queueName)
+      queueUrl  <- SqsUtils.getQueueUrl(client, queueName)
       _         <- SqsPublisher.send(client, queueUrl, "hello")
       _         <- SqsStream(
                      client,

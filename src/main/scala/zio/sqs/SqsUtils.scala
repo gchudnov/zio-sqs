@@ -6,7 +6,7 @@ import zio.{ IO, Task }
 
 import scala.jdk.CollectionConverters._
 
-object Utils {
+object SqsUtils {
 
   def createQueue(
     client: SqsAsyncClient,

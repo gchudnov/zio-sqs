@@ -95,8 +95,8 @@ object SqsPublishStreamSpec
             results <- server.use { _ =>
                         client.use { c =>
                           for {
-                            _         <- Utils.createQueue(c, queueName)
-                            queueUrl  <- Utils.getQueueUrl(c, queueName)
+                            _         <- SqsUtils.createQueue(c, queueName)
+                            queueUrl  <- SqsUtils.getQueueUrl(c, queueName)
                             (req, ms) = SqsPublisherStream.buildSendMessageBatchRequest(queueUrl, events)
                             results   <- SqsPublisherStream.runSendMessageBatchRequest(c, req, ms)
                           } yield results
@@ -120,12 +120,12 @@ object SqsPublishStreamSpec
             results <- server.use { _ =>
                         client.use { c =>
                           for {
-                            _        <- Utils.createQueue(c, queueName)
-                            queueUrl <- Utils.getQueueUrl(c, queueName)
+                            _        <- SqsUtils.createQueue(c, queueName)
+                            queueUrl <- SqsUtils.getQueueUrl(c, queueName)
                             sendStream = SqsPublisherStream
                               .sendStream(c, queueUrl, settings = SqsPublisherStreamSettings()) _
                             results <- sendStream(Stream(events: _*))
-                                        .run(Sink.collectAll[SqsPublishErrorOrEvent]) // replace with .via when ZIO > RC17 is released
+                                        .run(Sink.collectAll[SqsPublishErrorOrResult]) // replace with .via when ZIO > RC17 is released
                           } yield results
                         }
                       }

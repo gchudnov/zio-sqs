@@ -3,20 +3,54 @@ package zio.sqs
 import java.util.function.BiFunction
 
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
-import software.amazon.awssdk.services.sqs.model.{SendMessageBatchRequest, SendMessageBatchRequestEntry, SendMessageBatchResponse}
+import software.amazon.awssdk.services.sqs.model.{ SendMessageBatchRequest, SendMessageBatchRequestEntry, SendMessageBatchResponse }
 import zio.clock.Clock
-import zio.stream.{Sink, Stream, ZSink, ZStream}
-import zio.{IO, Schedule, Task}
+import zio.stream.{ Sink, Stream, ZStream }
+import zio.{ IO, Promise, Queue, Schedule, Task, ZManaged }
 
 import scala.jdk.CollectionConverters._
 
 object SqsPublisherStream {
 
+  def producer(
+    client: SqsAsyncClient,
+    queueUrl: String,
+    settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
+  ): ZManaged[Clock, Throwable, SqsProducer] = {
+    val eventQueueSize = nextPower2(settings.batchSize * settings.parallelism)
+    for {
+      eventQueue  <- Queue.bounded[SqsPublishEvent](eventQueueSize).toManaged(_.shutdown)
+      failedQueue <- Queue.bounded[SqsPublishEvent](eventQueueSize).toManaged(_.shutdown)
+      stream = (ZStream
+        .fromQueue(failedQueue)
+        .merge(ZStream.fromQueue(eventQueue)))
+        .aggregateAsyncWithin(
+          Sink.collectAllN[SqsPublishEvent](settings.batchSize.toLong),
+          Schedule.spaced(settings.duration)
+        )
+        .map(buildSendMessageBatchRequest(queueUrl, _))
+        .mapMParUnordered(settings.parallelism)(it => runSendMessageBatchRequest(client, it._1, it._2))
+        .mapConcat(identity)
+      _ <- stream.runDrain.toManaged_.fork
+    } yield new SqsProducer {
+      override def produce(e: SqsPublishEvent): Task[SqsPublishErrorOrResult] =
+        for {
+          done <- Promise.make[Throwable, SqsPublishErrorOrResult]
+          _    <- eventQueue.offer(e)
+        } yield response
+
+      override def produceBatch(es: List[SqsPublishEvent]): Task[List[SqsPublishErrorOrResult]] = ???
+
+      override def sendStream: Stream[Throwable, SqsPublishEvent] => ZStream[Clock, Throwable, SqsPublishErrorOrResult] =
+        ???
+    }
+  }
+
   def sendStream(
     client: SqsAsyncClient,
     queueUrl: String,
     settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
-  ): Stream[Throwable, SqsPublishEvent] => ZStream[Clock, Throwable, SqsPublishErrorOrEvent] = { es =>
+  ): Stream[Throwable, SqsPublishEvent] => ZStream[Clock, Throwable, SqsPublishErrorOrResult] = { es =>
     es.aggregateAsyncWithin(
         Sink.collectAllN[SqsPublishEvent](settings.batchSize.toLong),
         Schedule.spaced(settings.duration)
@@ -56,8 +90,8 @@ object SqsPublisherStream {
     client: SqsAsyncClient,
     req: SendMessageBatchRequest,
     indexedMessages: List[(SqsPublishEvent, Int)]
-  ): Task[List[SqsPublishErrorOrEvent]] =
-    Task.effectAsync[List[SqsPublishErrorOrEvent]]({ cb =>
+  ): Task[List[SqsPublishErrorOrResult]] =
+    Task.effectAsync[List[SqsPublishErrorOrResult]]({ cb =>
       client
         .sendMessageBatch(req)
         .handleAsync[Unit](new BiFunction[SendMessageBatchResponse, Throwable, Unit] {
@@ -69,13 +103,13 @@ object SqsPublisherStream {
                 val ss = res
                   .successful()
                   .asScala
-                  .map(res => Right(SqsPublishEventResult(res, m(res.id()))): SqsPublishErrorOrEvent)
+                  .map(res => Right(SqsPublishEventResult(res, m(res.id()))): SqsPublishErrorOrResult)
                   .toList
 
                 val es = res
                   .failed()
                   .asScala
-                  .map(err => Left(SqsPublishEventError(err, m(err.id()))): SqsPublishErrorOrEvent)
+                  .map(err => Left(SqsPublishEventError(err, m(err.id()))): SqsPublishErrorOrResult)
                   .toList
 
                 cb(IO.succeed(ss ++ es))
@@ -85,4 +119,21 @@ object SqsPublisherStream {
         })
       ()
     })
+
+  private[sqs] def nextPower2(n: Int): Int = {
+    var m: Int = n
+    m -= 1
+    m |= m >> 1
+    m |= m >> 2
+    m |= m >> 4
+    m |= m >> 8
+    m |= m >> 16
+    m += 1
+    m
+  }
+
+  final case class AwaitableSqsPublishEvent(
+    event: SqsPublishEvent,
+    done: Promise[Throwable, SqsPublishErrorOrResult]
+  )
 }

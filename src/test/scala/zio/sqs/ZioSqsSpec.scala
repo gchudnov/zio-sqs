@@ -76,8 +76,8 @@ object ZioSqsSpecUtil {
       client <- clientResource
       messagesFromQueue <- client.use { c =>
                             for {
-                              _        <- Utils.createQueue(c, queueName)
-                              queueUrl <- Utils.getQueueUrl(c, queueName)
+                              _        <- SqsUtils.createQueue(c, queueName)
+                              queueUrl <- SqsUtils.getQueueUrl(c, queueName)
                               _        <- ZIO.foreach(messages)(SqsPublisher.send(c, queueUrl, _))
                               messagesFromQueue <- SqsStream(
                                                     c,
@@ -96,7 +96,7 @@ object ZioSqsSpecUtil {
       client <- clientResource
       list <- client.use { c =>
                for {
-                 queueUrl <- Utils.getQueueUrl(c, queueName)
+                 queueUrl <- SqsUtils.getQueueUrl(c, queueName)
                  _ <- ZIO.foreach(messages)(
                        SqsStream.deleteMessage(
                          c,
@@ -120,7 +120,7 @@ object ZioSqsSpecUtil {
       client <- clientResource
       list <- client.use { c =>
                for {
-                 queueUrl <- Utils.getQueueUrl(c, queueName)
+                 queueUrl <- SqsUtils.getQueueUrl(c, queueName)
                  list <- SqsStream(
                           c,
                           queueUrl,
