@@ -37,6 +37,7 @@ object SqsPublisherStream {
         for {
           done <- Promise.make[Throwable, SqsPublishErrorOrResult]
           _    <- eventQueue.offer(e)
+          response <- done.await
         } yield response
 
       override def produceBatch(es: List[SqsPublishEvent]): Task[List[SqsPublishErrorOrResult]] = ???
