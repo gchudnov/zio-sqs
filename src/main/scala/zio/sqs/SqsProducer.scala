@@ -8,7 +8,7 @@ trait SqsProducer {
 
   def produce(e: SqsPublishEvent): Task[SqsPublishErrorOrResult]
 
-  def produceBatch(es: List[SqsPublishEvent]): Task[List[SqsPublishErrorOrResult]]
+  def produceBatch(es: Iterable[SqsPublishEvent]): Task[List[SqsPublishErrorOrResult]]
 
   def sendStream: Stream[Throwable, SqsPublishEvent] => ZStream[Clock, Throwable, SqsPublishErrorOrResult]
 
