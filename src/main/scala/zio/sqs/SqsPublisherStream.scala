@@ -5,10 +5,12 @@ import java.util.function.BiFunction
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
 import software.amazon.awssdk.services.sqs.model.{ SendMessageBatchRequest, SendMessageBatchRequestEntry, SendMessageBatchResponse }
 import zio.clock.Clock
+import zio.duration.Duration
 import zio.stream.{ Sink, Stream, ZStream }
 import zio.{ IO, Promise, Queue, Schedule, Task, ZIO, ZManaged }
 
 import scala.jdk.CollectionConverters._
+import scala.util.control.NonFatal
 
 object SqsPublisherStream {
 
@@ -19,17 +21,18 @@ object SqsPublisherStream {
   ): ZManaged[Clock, Throwable, SqsProducer] = {
     val eventQueueSize = nextPower2(settings.batchSize * settings.parallelism)
     for {
-      eventQueue  <- Queue.bounded[SqsRequestEntry](eventQueueSize).toManaged(_.shutdown)
-      failedQueue <- Queue.bounded[SqsRequestEntry](eventQueueSize).toManaged(_.shutdown)
+      eventQueue <- Queue.bounded[SqsRequestEntry](eventQueueSize).toManaged(_.shutdown)
+      failQueue  <- Queue.bounded[SqsRequestEntry](eventQueueSize).toManaged(_.shutdown)
+      reqRunner  = runSendMessageBatchRequest(client, failQueue, settings.retryDelay, settings.retryMaxCount) _
       stream = (ZStream
-        .fromQueue(failedQueue)
+        .fromQueue(failQueue)
         .merge(ZStream.fromQueue(eventQueue)))
         .aggregateAsyncWithin(
           Sink.collectAllN[SqsRequestEntry](settings.batchSize.toLong),
           Schedule.spaced(settings.duration)
         )
         .map(buildSendMessageBatchRequest(queueUrl, _))
-        .mapMParUnordered(settings.parallelism)(req => runSendMessageBatchRequest(client, req))
+        .mapMParUnordered(settings.parallelism)(req => reqRunner(req))
         .mapConcat(identity)
       _ <- stream.runDrain.toManaged_.fork
     } yield new SqsProducer {
@@ -37,7 +40,7 @@ object SqsPublisherStream {
       override def produce(e: SqsPublishEvent): Task[SqsPublishErrorOrResult] =
         for {
           done     <- Promise.make[Throwable, SqsPublishErrorOrResult]
-          _        <- eventQueue.offer(SqsRequestEntry(e, done))
+          _        <- eventQueue.offer(SqsRequestEntry(e, done, 0))
           response <- done.await
         } yield response
 
@@ -46,7 +49,7 @@ object SqsPublisherStream {
           .traverse(es) { e =>
             for {
               done <- Promise.make[Throwable, SqsPublishErrorOrResult]
-            } yield SqsRequestEntry(e, done)
+            } yield SqsRequestEntry(e, done, 0)
           }
           .flatMap(es => eventQueue.offerAll(es) *> ZIO.collectAllPar(es.map(_.done.await)))
 
@@ -91,35 +94,55 @@ object SqsPublisherStream {
     SqsRequest(req, entries)
   }
 
-  private[sqs] def runSendMessageBatchRequest(client: SqsAsyncClient, req: SqsRequest): Task[List[SqsPublishErrorOrResult]] =
-    Task.effectAsync[List[SqsPublishErrorOrResult]]({ cb =>
+  private[sqs] def runSendMessageBatchRequest(client: SqsAsyncClient, failedQueue: Queue[SqsRequestEntry], retryDelay: Duration, retryMaxCount: Int)(req: SqsRequest): Task[Unit] =
+    Task.effectAsync[Unit]({ cb =>
       client
         .sendMessageBatch(req.inner)
         .handleAsync[Unit](new BiFunction[SendMessageBatchResponse, Throwable, Unit] {
           override def apply(res: SendMessageBatchResponse, err: Throwable): Unit =
             err match {
               case null =>
-                val m = req.entries.zipWithIndex.map(it => (it._2.toString, it._1.event)).toMap
+                val m                               = req.entries.zipWithIndex.map(it => (it._2.toString, it._1)).toMap
+                val (successful, retryable, errors) = partitionResponse(m, retryMaxCount, res)
 
-                val ss = res
-                  .successful()
-                  .asScala
-                  .map(res => Right(SqsPublishEventResult(res, m(res.id()))): SqsPublishErrorOrResult)
-                  .toList
+                val retryableEntries = retryable.map(it => m(it.id()))
 
-                val es = res
-                  .failed()
-                  .asScala
-                  .map(err => Left(SqsPublishEventError(err, m(err.id()))): SqsPublishErrorOrResult)
-                  .toList
+                val ret = for {
+                  _ <- failedQueue.offerAll(retryableEntries).delay(retryDelay).fork
+                  _ <- ZIO.traverse(successful) { it =>
+                        val entry = m(it.id())
+                        val res   = Right(SqsPublishEventResult(it, entry.event)): SqsPublishErrorOrResult
+                        entry.done.succeed(res)
+                      }
+                  _ <- ZIO.traverse((unrecoverable ++ unretryable)) { it =>
+                        val entry = m(it.id())
+                        val res   = Left(SqsPublishEventError(it, entry.event)): SqsPublishErrorOrResult
+                        entry.done.succeed(res)
+                      }
+                } yield ()
 
-                cb(IO.succeed(ss ++ es))
+                ret.catchAll {
+                  case NonFatal(e) => ZIO.foreach_(req.entries.map(_.done))(_.fail(e))
+                }
+
+                cb(IO.succeed(()))
               case ex =>
+                ZIO.foreach_(req.entries.map(_.done))(_.fail(ex))
                 cb(IO.fail(ex))
             }
         })
       ()
     })
+
+  private[sqs] def partitionResponse(m: Map[String, SqsRequestEntry], retryMaxCount: Int, res: SendMessageBatchResponse) = {
+    val successful = res.successful().asScala
+    val failed     = res.failed().asScala
+
+    val (recoverable, unrecoverable) = failed.partition(it => SqsPublishEventError.isRecoverable(it.code()))
+    val (retryable, unretryable)     = recoverable.partition(it => m(it.id()).retryCount < retryMaxCount)
+
+    (successful, retryable, unrecoverable ++ unretryable)
+  }
 
   private[sqs] def nextPower2(n: Int): Int = {
     var m: Int = n
@@ -135,11 +158,13 @@ object SqsPublisherStream {
 
   private[sqs] final case class SqsRequestEntry(
     event: SqsPublishEvent,
-    done: Promise[Throwable, SqsPublishErrorOrResult]
+    done: Promise[Throwable, SqsPublishErrorOrResult],
+    retryCount: Int
   )
 
   private[sqs] final case class SqsRequest(
     inner: SendMessageBatchRequest,
     entries: List[SqsRequestEntry]
   )
+
 }

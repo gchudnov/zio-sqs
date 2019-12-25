@@ -12,6 +12,11 @@ final case class SqsPublishEventError(
 
 object SqsPublishEventError {
 
+  private val RecoverableCodes = Set(
+    "ServiceUnavailable",
+    "ThrottlingException"
+  )
+
   def apply(entry: BatchResultErrorEntry, event: SqsPublishEvent): SqsPublishEventError = SqsPublishEventError(
     id = entry.id(),
     senderFault = entry.senderFault(),
@@ -19,5 +24,8 @@ object SqsPublishEventError {
     message = Option(entry.message()),
     event = event
   )
+
+  def isRecoverable(code: String): Boolean =
+    RecoverableCodes.contains(code)
 
 }
