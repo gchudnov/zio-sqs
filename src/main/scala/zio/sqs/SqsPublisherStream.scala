@@ -51,8 +51,8 @@ object SqsPublisherStream {
           }
           .flatMap(es => eventQueue.offerAll(es) *> ZIO.collectAllPar(es.map(_.done.await)))
 
-      override def sendStream: Stream[Throwable, SqsPublishEvent] => ZStream[Clock, Throwable, SqsPublishErrorOrResult] = es => es.mapMParUnordered(settings.batchSize)(produce)
-
+      override def sendStream: Stream[Throwable, SqsPublishEvent] => ZStream[Clock, Throwable, SqsPublishErrorOrResult] =
+        es => es.mapMParUnordered(settings.batchSize)(produce)
     }
   }
 
