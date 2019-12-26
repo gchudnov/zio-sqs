@@ -108,19 +108,16 @@ object SqsPublishStreamSpec
           val queueUrl      = "sqs://some-queue-url"
           val retryMaxCount = 10
           for {
-            done0         <- Promise.make[Throwable, SqsPublishErrorOrResult]
-            done1         <- Promise.make[Throwable, SqsPublishErrorOrResult]
-            done2         <- Promise.make[Throwable, SqsPublishErrorOrResult]
-            done3         <- Promise.make[Throwable, SqsPublishErrorOrResult]
-            requestEntry0 = SqsRequestEntry(SqsPublishEvent("A"), done0, 1)
-            requestEntry1 = SqsRequestEntry(SqsPublishEvent("B"), done1, 2)
-            requestEntry2 = SqsRequestEntry(SqsPublishEvent("C"), done2, 10)
-            requestEntry3 = SqsRequestEntry(SqsPublishEvent("D"), done3, 3)
+            dones <- ZIO.traverse(Range(0, 4))(_ => Promise.make[Throwable, SqsPublishErrorOrResult])
+            requestEntry0 = SqsRequestEntry(SqsPublishEvent("A"), dones(0), 1)
+            requestEntry1 = SqsRequestEntry(SqsPublishEvent("B"), dones(1), 2)
+            requestEntry2 = SqsRequestEntry(SqsPublishEvent("C"), dones(2), 10)
+            requestEntry3 = SqsRequestEntry(SqsPublishEvent("D"), dones(3), 3)
             m             = Map("0" -> requestEntry0, "1" -> requestEntry1, "2" -> requestEntry2, "3" -> requestEntry3)
             resultEntry0  = SendMessageBatchResultEntry.builder().id("0").build()
-            errorEntry1   = BatchResultErrorEntry.builder().id("1").code("ServiceUnavailable").build()
-            errorEntry2   = BatchResultErrorEntry.builder().id("2").code("ThrottlingException").build()
-            errorEntry3   = BatchResultErrorEntry.builder().id("3").code("AccessDeniedException").build()
+            errorEntry1   = BatchResultErrorEntry.builder().id("1").code("ServiceUnavailable").senderFault(false).build()
+            errorEntry2   = BatchResultErrorEntry.builder().id("2").code("ThrottlingException").senderFault(false).build()
+            errorEntry3   = BatchResultErrorEntry.builder().id("3").code("AccessDeniedException").senderFault(false).build()
             res = SendMessageBatchResponse
               .builder()
               .successful(resultEntry0)
@@ -132,6 +129,41 @@ object SqsPublishStreamSpec
             assert(successful.toList.size, equalTo(1)) &&
             assert(retryable.toList.size, equalTo(1)) &&
             assert(errors.toList.size, equalTo(2))
+          }
+        },
+        testM("SendMessageBatchResponse can be partitioned and mapped") {
+          val queueUrl      = "sqs://some-queue-url"
+          val retryMaxCount = 10
+          for {
+            dones <- ZIO.traverse(Range(0, 4))(_ => Promise.make[Throwable, SqsPublishErrorOrResult])
+            requestEntry0 = SqsRequestEntry(SqsPublishEvent("A"), dones(0), 1)
+            requestEntry1 = SqsRequestEntry(SqsPublishEvent("B"), dones(1), 2)
+            requestEntry2 = SqsRequestEntry(SqsPublishEvent("C"), dones(2), 10)
+            requestEntry3 = SqsRequestEntry(SqsPublishEvent("D"), dones(3), 3)
+            m             = Map("0" -> requestEntry0, "1" -> requestEntry1, "2" -> requestEntry2, "3" -> requestEntry3)
+            resultEntry0  = SendMessageBatchResultEntry.builder().id("0").build()
+            errorEntry1   = BatchResultErrorEntry.builder().id("1").code("ServiceUnavailable").senderFault(false).build()
+            errorEntry2   = BatchResultErrorEntry.builder().id("2").code("ThrottlingException").senderFault(false).build()
+            errorEntry3   = BatchResultErrorEntry.builder().id("3").code("AccessDeniedException").senderFault(false).build()
+            res = SendMessageBatchResponse
+              .builder()
+              .successful(resultEntry0)
+              .failed(errorEntry1, errorEntry2, errorEntry3)
+              .build()
+            partitioner                     = SqsPublisherStream.partitionResponse(m, retryMaxCount) _
+            (successful, retryable, errors) = partitioner(res)
+            mapper = SqsPublisherStream.mapResponse(m) _
+            (successfulEntries, retryableEntries, errorsEntries) = mapper(successful, retryable, errors)
+          } yield {
+            assert(successful.toList.size, equalTo(1)) &&
+            assert(retryable.toList.size, equalTo(1)) &&
+            assert(errors.toList.size, equalTo(2)) &&
+            assert(successfulEntries.toList.size, equalTo(1)) &&
+            assert(retryableEntries.toList.size, equalTo(1)) &&
+            assert(errorsEntries.toList.size, equalTo(2)) &&
+            assert(successfulEntries.toList.map(_.event.body), hasSameElements(List("A"))) &&
+            assert(retryableEntries.toList.map(_.event.body), hasSameElements(List("B"))) &&
+            assert(errorsEntries.toList.map(_.error.event.body), hasSameElements(List("C", "D")))
           }
         },
         testM("buildSendMessageBatchRequest creates a new request") {
