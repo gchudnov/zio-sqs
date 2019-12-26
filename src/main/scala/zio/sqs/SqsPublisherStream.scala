@@ -3,20 +3,13 @@ package zio.sqs
 import java.util.function.BiFunction
 
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
-import software.amazon.awssdk.services.sqs.model.{
-  BatchResultErrorEntry,
-  SendMessageBatchRequest,
-  SendMessageBatchRequestEntry,
-  SendMessageBatchResponse,
-  SendMessageBatchResultEntry
-}
+import software.amazon.awssdk.services.sqs.model._
 import zio.clock.Clock
 import zio.duration.Duration
 import zio.stream.{ Sink, Stream, ZStream }
-import zio.{ IO, Promise, Queue, RIO, Schedule, Task, ZIO, ZManaged }
+import zio._
 
 import scala.jdk.CollectionConverters._
-import scala.util.control.NonFatal
 
 object SqsPublisherStream {
 
@@ -39,7 +32,6 @@ object SqsPublisherStream {
         )
         .map(buildSendMessageBatchRequest(queueUrl, _))
         .mapMParUnordered(settings.parallelism)(req => reqRunner(req))
-        .mapConcat(identity)
       _ <- stream.runDrain.toManaged_.fork
     } yield new SqsProducer {
 
@@ -59,24 +51,10 @@ object SqsPublisherStream {
           }
           .flatMap(es => eventQueue.offerAll(es) *> ZIO.collectAllPar(es.map(_.done.await)))
 
-      override def sendStream: Stream[Throwable, SqsPublishEvent] => ZStream[Clock, Throwable, SqsPublishErrorOrResult] =
-        ???
+      override def sendStream: Stream[Throwable, SqsPublishEvent] => ZStream[Clock, Throwable, SqsPublishErrorOrResult] = es => es.mapMParUnordered(settings.batchSize)(produce)
+
     }
   }
-
-//  def sendStream(
-//    client: SqsAsyncClient,
-//    queueUrl: String,
-//    settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
-//  ): Stream[Throwable, SqsPublishEvent] => ZStream[Clock, Throwable, SqsPublishErrorOrResult] = { es =>
-//    es.aggregateAsyncWithin(
-//        Sink.collectAllN[SqsPublishEvent](settings.batchSize.toLong),
-//        Schedule.spaced(settings.duration)
-//      )
-//      .map(buildSendMessageBatchRequest(queueUrl, _))
-//      .mapMParUnordered(settings.parallelism)(it => runSendMessageBatchRequest(client, it._1, it._2))
-//      .mapConcat(identity)
-//  }
 
   private[sqs] def buildSendMessageBatchRequest(queueUrl: String, entries: List[SqsRequestEntry]): SqsRequest = {
     val reqEntries = entries.zipWithIndex.map {
