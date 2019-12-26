@@ -1,8 +1,10 @@
 package zio.sqs
 
 import software.amazon.awssdk.services.sqs.model.MessageAttributeValue
+import zio.{Promise, ZIO}
+import zio.sqs.SqsPublisherStream.SqsRequestEntry
 import zio.sqs.ZioSqsMockServer._
-import zio.stream.{ Sink, Stream }
+import zio.stream.{Sink, Stream}
 import zio.test.Assertion._
 import zio.test._
 
@@ -11,7 +13,7 @@ import scala.jdk.CollectionConverters._
 object SqsPublishStreamSpec
     extends DefaultRunnableSpec(
       suite("SqsPublishStream")(
-        test("buildSendMessageBatchRequest can be created") {
+        testM("buildSendMessageBatchRequest creates a new request") {
           val queueUrl = "sqs://queue"
 
           val attr = MessageAttributeValue
@@ -35,52 +37,37 @@ object SqsPublishStreamSpec
             )
           )
 
-          val (req, indexedMessages) = SqsPublisherStream.buildSendMessageBatchRequest(queueUrl, events)
-          val reqEntries             = req.entries().asScala
+          for {
+            reqEntries <- ZIO.traverse(events) { event =>
+              for {
+                done <- Promise.make[Throwable, SqsPublishErrorOrResult]
+              } yield SqsRequestEntry(event, done, 1)
+            }
+          } yield {
+            val req = SqsPublisherStream.buildSendMessageBatchRequest(queueUrl, reqEntries)
 
-          assert(reqEntries.size, equalTo(2))
+            val innerReq = req.inner
+            val innerReqEntries             = req.inner.entries().asScala
 
-          assert(reqEntries(0).id(), equalTo("0"))
-          assert(reqEntries(0).messageBody(), equalTo("A"))
-          assert(reqEntries(0).messageAttributes().size(), equalTo(1))
-          assert(reqEntries(0).messageAttributes().asScala.contains("Name"), equalTo(true))
-          assert(reqEntries(0).messageAttributes().asScala("Name"), equalTo(attr))
-          assert(Option(reqEntries(0).messageGroupId()), equalTo(Some("g1")))
-          assert(Option(reqEntries(0).messageDeduplicationId()), equalTo(Some("d1")))
+            assert(innerReq.hasEntries, equalTo(true))
+            assert(innerReqEntries.size, equalTo(2))
 
-          assert(reqEntries(1).id(), equalTo("1"))
-          assert(reqEntries(1).messageBody(), equalTo("B"))
-          assert(reqEntries(1).messageAttributes().size(), equalTo(0))
-          assert(Option(reqEntries(1).messageGroupId()), equalTo(Some("g2")))
-          assert(Option(reqEntries(1).messageDeduplicationId()), equalTo(Some("d2")))
+            assert(innerReqEntries(0).id(), equalTo("0"))
+            assert(innerReqEntries(0).messageBody(), equalTo("A"))
+            assert(innerReqEntries(0).messageAttributes().size(), equalTo(1))
+            assert(innerReqEntries(0).messageAttributes().asScala.contains("Name"), equalTo(true))
+            assert(innerReqEntries(0).messageAttributes().asScala("Name"), equalTo(attr))
+            assert(Option(innerReqEntries(0).messageGroupId()), equalTo(Some("g1")))
+            assert(Option(innerReqEntries(0).messageDeduplicationId()), equalTo(Some("d1")))
 
-          assert(indexedMessages, equalTo(events.zipWithIndex))
-        },
-        test("buildSendMessageBatchRequest can be created from strings") {
-          val queueUrl = "sqs://queue"
-          val events = List(
-            SqsPublishEvent("a"),
-            SqsPublishEvent("b")
-          )
+            assert(innerReqEntries(1).id(), equalTo("1"))
+            assert(innerReqEntries(1).messageBody(), equalTo("B"))
+            assert(innerReqEntries(1).messageAttributes().size(), equalTo(0))
+            assert(Option(innerReqEntries(1).messageGroupId()), equalTo(Some("g2")))
+            assert(Option(innerReqEntries(1).messageDeduplicationId()), equalTo(Some("d2")))
 
-          val (req, indexedMessages) = SqsPublisherStream.buildSendMessageBatchRequest(queueUrl, events)
-          val reqEntries             = req.entries().asScala
-
-          assert(reqEntries.size, equalTo(2))
-
-          assert(reqEntries(0).id(), equalTo("0"))
-          assert(reqEntries(0).messageBody(), equalTo("a"))
-          assert(reqEntries(0).messageAttributes().size(), equalTo(0))
-          assert(Option(reqEntries(0).messageGroupId()), equalTo(None))
-          assert(Option(reqEntries(0).messageDeduplicationId()), equalTo(None))
-
-          assert(reqEntries(1).id(), equalTo("1"))
-          assert(reqEntries(1).messageBody(), equalTo("b"))
-          assert(reqEntries(1).messageAttributes().size(), equalTo(0))
-          assert(Option(reqEntries(1).messageGroupId()), equalTo(None))
-          assert(Option(reqEntries(1).messageDeduplicationId()), equalTo(None))
-
-          assert(indexedMessages, equalTo(events.zipWithIndex))
+            assert(req.entries, equalTo(reqEntries))
+          }
         },
         testM("runSendMessageBatchRequest can be executed") {
           val queueName = "SqsPublishStreamSpec_runSend"
