@@ -3,7 +3,13 @@ package zio.sqs
 import java.util.function.BiFunction
 
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
-import software.amazon.awssdk.services.sqs.model.{ SendMessageBatchRequest, SendMessageBatchRequestEntry, SendMessageBatchResponse }
+import software.amazon.awssdk.services.sqs.model.{
+  BatchResultErrorEntry,
+  SendMessageBatchRequest,
+  SendMessageBatchRequestEntry,
+  SendMessageBatchResponse,
+  SendMessageBatchResultEntry
+}
 import zio.clock.Clock
 import zio.duration.Duration
 import zio.stream.{ Sink, Stream, ZStream }
@@ -103,27 +109,24 @@ object SqsPublisherStream {
             err match {
               case null =>
                 val m                               = req.entries.zipWithIndex.map(it => (it._2.toString, it._1)).toMap
-                val (successful, retryable, errors) = partitionResponse(m, retryMaxCount, res)
 
-                val retryableEntries = retryable.map(it => m(it.id()))
+                val responseParitioner = partitionResponse(m, retryMaxCount) _
+                val responseMapper = mapResponse(m) _
+
+                val (successful, retryable, errors) = responseMapper.tupled(responseParitioner(res))
 
                 val ret = for {
-                  _ <- failedQueue.offerAll(retryableEntries).delay(retryDelay).fork
-                  _ <- ZIO.traverse(successful) { it =>
-                        val entry = m(it.id())
-                        val res   = Right(SqsPublishEventResult(it, entry.event)): SqsPublishErrorOrResult
-                        entry.done.succeed(res)
-                      }
-                  _ <- ZIO.traverse((unrecoverable ++ unretryable)) { it =>
-                        val entry = m(it.id())
-                        val res   = Left(SqsPublishEventError(it, entry.event)): SqsPublishErrorOrResult
-                        entry.done.succeed(res)
-                      }
+                  _ <- failedQueue.offerAll(retryable).delay(retryDelay).fork
+                  _ <- ZIO.traverse(successful)(entry => entry.done.succeed(Right(entry.event): SqsPublishErrorOrResult))
+                  _ <- ZIO.traverse(errors)(entry => entry.done.succeed(Left(SqsPublishEventError(it, entry.event)): SqsPublishErrorOrResult))
                 } yield ()
 
                 ret.catchAll {
                   case NonFatal(e) => ZIO.foreach_(req.entries.map(_.done))(_.fail(e))
                 }
+
+                // Left(SqsPublishEventError(it, entry.event)): SqsPublishErrorOrResult
+                //       .map(it => )
 
                 cb(IO.succeed(()))
               case ex =>
@@ -134,7 +137,7 @@ object SqsPublisherStream {
       ()
     })
 
-  private[sqs] def partitionResponse(m: Map[String, SqsRequestEntry], retryMaxCount: Int, res: SendMessageBatchResponse) = {
+  private[sqs] def partitionResponse(m: Map[String, SqsRequestEntry], retryMaxCount: Int)(res: SendMessageBatchResponse) = {
     val successful = res.successful().asScala
     val failed     = res.failed().asScala
 
@@ -142,6 +145,19 @@ object SqsPublisherStream {
     val (retryable, unretryable)     = recoverable.partition(it => m(it.id()).retryCount < retryMaxCount)
 
     (successful, retryable, unrecoverable ++ unretryable)
+  }
+
+  private[sqs] def mapResponse(
+    m: Map[String, SqsRequestEntry]
+  )(successful: Iterable[SendMessageBatchResultEntry], retryable: Iterable[BatchResultErrorEntry], errors: Iterable[BatchResultErrorEntry]) = {
+    val successfulEntries = successful.map(res => m(res.id()))
+    val retryableEntries  = retryable.map(res => m(res.id()))
+    val errorEntries = errors.map { err =>
+      val entry = m(err.id())
+      SqsResponseErrorEntry(entry.done, SqsPublishEventError(err, entry.event))
+    }
+
+    (successfulEntries, retryableEntries, errorEntries)
   }
 
   private[sqs] def nextPower2(n: Int): Int = {
@@ -160,6 +176,11 @@ object SqsPublisherStream {
     event: SqsPublishEvent,
     done: Promise[Throwable, SqsPublishErrorOrResult],
     retryCount: Int
+  )
+
+  private[sqs] final case class SqsResponseErrorEntry(
+    done: Promise[Throwable, SqsPublishErrorOrResult],
+    error: SqsPublishEventError
   )
 
   private[sqs] final case class SqsRequest(
