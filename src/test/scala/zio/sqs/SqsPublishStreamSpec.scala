@@ -1,12 +1,14 @@
 package zio.sqs
 
 import software.amazon.awssdk.services.sqs.model.MessageAttributeValue
-import zio.{Promise, ZIO}
+import zio.{Promise, Queue, UIO, ZIO, ZManaged}
 import zio.sqs.SqsPublisherStream.SqsRequestEntry
 import zio.sqs.ZioSqsMockServer._
 import zio.stream.{Sink, Stream}
 import zio.test.Assertion._
 import zio.test._
+import zio.duration._
+import SqsPublishStreamSpecUtil._
 
 import scala.jdk.CollectionConverters._
 
@@ -41,13 +43,15 @@ object SqsPublishStreamSpec
             reqEntries <- ZIO.traverse(events) { event =>
               for {
                 done <- Promise.make[Throwable, SqsPublishErrorOrResult]
-              } yield SqsRequestEntry(event, done, 1)
+              } yield SqsRequestEntry(event, done, 0)
             }
           } yield {
             val req = SqsPublisherStream.buildSendMessageBatchRequest(queueUrl, reqEntries)
 
             val innerReq = req.inner
             val innerReqEntries             = req.inner.entries().asScala
+
+            assert(req.entries, equalTo(reqEntries))
 
             assert(innerReq.hasEntries, equalTo(true))
             assert(innerReqEntries.size, equalTo(2))
@@ -65,8 +69,6 @@ object SqsPublishStreamSpec
             assert(innerReqEntries(1).messageAttributes().size(), equalTo(0))
             assert(Option(innerReqEntries(1).messageGroupId()), equalTo(Some("g2")))
             assert(Option(innerReqEntries(1).messageDeduplicationId()), equalTo(Some("d2")))
-
-            assert(req.entries, equalTo(reqEntries))
           }
         },
         testM("runSendMessageBatchRequest can be executed") {
@@ -77,21 +79,31 @@ object SqsPublishStreamSpec
                        .sample
                        .map(_.value.map(SqsPublishEvent(_)))
                        .run(Sink.await[List[SqsPublishEvent]])
+            reqEntries <- ZIO.traverse(events) { event =>
+              for {
+                done <- Promise.make[Throwable, SqsPublishErrorOrResult]
+              } yield SqsRequestEntry(event, done, 0)
+            }
             server <- serverResource
             client <- clientResource
-            results <- server.use { _ =>
-                        client.use { c =>
-                          for {
-                            _         <- SqsUtils.createQueue(c, queueName)
-                            queueUrl  <- SqsUtils.getQueueUrl(c, queueName)
-                            (req, ms) = SqsPublisherStream.buildSendMessageBatchRequest(queueUrl, events)
-                            results   <- SqsPublisherStream.runSendMessageBatchRequest(c, req, ms)
-                          } yield results
-                        }
-                      }
+            retryQueue <- queueResource(1)
+            _ <- server.use { _ =>
+              client.use { c =>
+                retryQueue.use { q =>
+                  for {
+                    _ <- SqsUtils.createQueue(c, queueName)
+                    queueUrl <- SqsUtils.getQueueUrl(c, queueName)
+                    req = SqsPublisherStream.buildSendMessageBatchRequest(queueUrl, reqEntries)
+                    retryDelay = 1.millisecond
+                    retryCount = 1
+                    reqSender = SqsPublisherStream.runSendMessageBatchRequest(c, q, retryDelay, retryCount)
+                    _ <- reqSender(req)
+                  } yield ()
+                }
+              }
+            }
           } yield {
-            assert(results.size, equalTo(events.size))
-            assert(results.forall(_.isRight), equalTo(true))
+            assertM(ZIO.traverse(reqEntries)(entry => entry.done.await).map(_.forall(_.isRight)), equalTo(true))
           }
         },
         testM("events can be published using a stream") {
@@ -105,7 +117,7 @@ object SqsPublishStreamSpec
             server <- serverResource
             client <- clientResource
             results <- server.use { _ =>
-                        client.use { c =>
+              client.use { c =>
                           for {
                             _        <- SqsUtils.createQueue(c, queueName)
                             queueUrl <- SqsUtils.getQueueUrl(c, queueName)
@@ -124,3 +136,10 @@ object SqsPublishStreamSpec
       ),
       List(TestAspect.executionStrategy(ExecutionStrategy.Sequential))
     )
+
+object SqsPublishStreamSpecUtil {
+
+  def queueResource(capacity: Int): UIO[ZManaged[Any, Nothing, Queue[SqsRequestEntry]]] = ZIO.succeed(
+    Queue.bounded[SqsRequestEntry](capacity).toManaged(_.shutdown)
+  )
+}
