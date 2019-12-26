@@ -5,7 +5,7 @@ import zio.duration._
 import zio.sqs.SqsPublishStreamSpecUtil._
 import zio.sqs.SqsPublisherStream.SqsRequestEntry
 import zio.sqs.ZioSqsMockServer._
-import zio.stream.Sink
+import zio.stream.{Sink, Stream}
 import zio.test.Assertion._
 import zio.test._
 import zio._
@@ -51,23 +51,20 @@ object SqsPublishStreamSpec
             val innerReq = req.inner
             val innerReqEntries             = req.inner.entries().asScala
 
-            assert(req.entries, equalTo(reqEntries))
-
-            assert(innerReq.hasEntries, equalTo(true))
-            assert(innerReqEntries.size, equalTo(2))
-
-            assert(innerReqEntries(0).id(), equalTo("0"))
-            assert(innerReqEntries(0).messageBody(), equalTo("A"))
-            assert(innerReqEntries(0).messageAttributes().size(), equalTo(1))
-            assert(innerReqEntries(0).messageAttributes().asScala.contains("Name"), equalTo(true))
-            assert(innerReqEntries(0).messageAttributes().asScala("Name"), equalTo(attr))
-            assert(Option(innerReqEntries(0).messageGroupId()), equalTo(Some("g1")))
-            assert(Option(innerReqEntries(0).messageDeduplicationId()), equalTo(Some("d1")))
-
-            assert(innerReqEntries(1).id(), equalTo("1"))
-            assert(innerReqEntries(1).messageBody(), equalTo("B"))
-            assert(innerReqEntries(1).messageAttributes().size(), equalTo(0))
-            assert(Option(innerReqEntries(1).messageGroupId()), equalTo(Some("g2")))
+            assert(req.entries, equalTo(reqEntries)) &&
+            assert(innerReq.hasEntries, equalTo(true)) &&
+            assert(innerReqEntries.size, equalTo(2)) &&
+            assert(innerReqEntries(0).id(), equalTo("0")) &&
+            assert(innerReqEntries(0).messageBody(), equalTo("A")) &&
+            assert(innerReqEntries(0).messageAttributes().size(), equalTo(1)) &&
+            assert(innerReqEntries(0).messageAttributes().asScala.contains("Name"), equalTo(true)) &&
+            assert(innerReqEntries(0).messageAttributes().asScala("Name"), equalTo(attr)) &&
+            assert(Option(innerReqEntries(0).messageGroupId()), equalTo(Some("g1"))) &&
+            assert(Option(innerReqEntries(0).messageDeduplicationId()), equalTo(Some("d1"))) &&
+            assert(innerReqEntries(1).id(), equalTo("1")) &&
+            assert(innerReqEntries(1).messageBody(), equalTo("B")) &&
+            assert(innerReqEntries(1).messageAttributes().size(), equalTo(0)) &&
+            assert(Option(innerReqEntries(1).messageGroupId()), equalTo(Some("g2"))) &&
             assert(Option(innerReqEntries(1).messageDeduplicationId()), equalTo(Some("d2")))
           }
         },
@@ -119,18 +116,18 @@ object SqsPublishStreamSpec
             client <- clientResource
             results <- server.use { _ =>
               client.use { c =>
-                          for {
-                            _        <- SqsUtils.createQueue(c, queueName)
-                            queueUrl <- SqsUtils.getQueueUrl(c, queueName)
-                            sendStream = SqsPublisherStream
-                              .sendStream(c, queueUrl, settings = SqsPublisherStreamSettings()) _
-                            results <- sendStream(Stream(events: _*))
-                                        .run(Sink.collectAll[SqsPublishErrorOrResult]) // replace with .via when ZIO > RC17 is released
-                          } yield results
-                        }
-                      }
+                  for {
+                    _ <- SqsUtils.createQueue(c, queueName)
+                    queueUrl <- SqsUtils.getQueueUrl(c, queueName)
+                    producer <- Task.succeed(SqsPublisherStream.producer(c, queueUrl))
+                    results <- producer.use { p =>
+                      p.sendStream(Stream(events: _*)).run(Sink.collectAll[SqsPublishErrorOrResult])  // replace with .via when ZIO > RC17 is released
+                    }
+                  } yield results
+                }
+              }
           } yield {
-            assert(results.size, equalTo(events.size))
+            assert(results.size, equalTo(events.size)) &&
             assert(results.forall(_.isRight), equalTo(true))
           }
         }
@@ -140,7 +137,7 @@ object SqsPublishStreamSpec
 
 object SqsPublishStreamSpecUtil {
 
-  def queueResource(capacity: Int): Task[ZManaged[Any, Throwable, Queue[SqsRequestEntry]]] = Task {
+  def queueResource(capacity: Int): Task[ZManaged[Any, Throwable, Queue[SqsRequestEntry]]] = Task.succeed {
     Queue.bounded[SqsRequestEntry](capacity).toManaged(_.shutdown)
   }
 
