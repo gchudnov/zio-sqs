@@ -105,19 +105,19 @@ object SqsPublishStreamSpec
           }
         },
         testM("SendMessageBatchResponse can be partitioned") {
-          val queueUrl      = "sqs://some-queue-url"
           val retryMaxCount = 10
+          val rs            = Range(0, 4).toList
+          val ids           = rs.map(_.toString)
+          val bodies        = rs.map(_ + 'A').map(_.toChar.toString)
+          val retries       = List(1, 2, retryMaxCount, 3)
           for {
-            dones <- ZIO.traverse(Range(0, 4))(_ => Promise.make[Throwable, SqsPublishErrorOrResult])
-            requestEntry0 = SqsRequestEntry(SqsPublishEvent("A"), dones(0), 1)
-            requestEntry1 = SqsRequestEntry(SqsPublishEvent("B"), dones(1), 2)
-            requestEntry2 = SqsRequestEntry(SqsPublishEvent("C"), dones(2), 10)
-            requestEntry3 = SqsRequestEntry(SqsPublishEvent("D"), dones(3), 3)
-            m             = Map("0" -> requestEntry0, "1" -> requestEntry1, "2" -> requestEntry2, "3" -> requestEntry3)
-            resultEntry0  = SendMessageBatchResultEntry.builder().id("0").build()
-            errorEntry1   = BatchResultErrorEntry.builder().id("1").code("ServiceUnavailable").senderFault(false).build()
-            errorEntry2   = BatchResultErrorEntry.builder().id("2").code("ThrottlingException").senderFault(false).build()
-            errorEntry3   = BatchResultErrorEntry.builder().id("3").code("AccessDeniedException").senderFault(false).build()
+            dones          <- ZIO.traverse(Range(0, 4))(_ => Promise.make[Throwable, SqsPublishErrorOrResult])
+            requestEntries = bodies.zip(dones).zip(retries).map { case ((a, b), c) => SqsRequestEntry(SqsPublishEvent(a), b, c) }
+            m              = ids.zip(requestEntries).toMap
+            resultEntry0   = SendMessageBatchResultEntry.builder().id("0").build()
+            errorEntry1    = BatchResultErrorEntry.builder().id("1").code("ServiceUnavailable").senderFault(false).build()
+            errorEntry2    = BatchResultErrorEntry.builder().id("2").code("ThrottlingException").senderFault(false).build()
+            errorEntry3    = BatchResultErrorEntry.builder().id("3").code("AccessDeniedException").senderFault(false).build()
             res = SendMessageBatchResponse
               .builder()
               .successful(resultEntry0)
@@ -132,27 +132,27 @@ object SqsPublishStreamSpec
           }
         },
         testM("SendMessageBatchResponse can be partitioned and mapped") {
-          val queueUrl      = "sqs://some-queue-url"
           val retryMaxCount = 10
+          val rs            = Range(0, 4).toList
+          val ids           = rs.map(_.toString)
+          val bodies        = rs.map(_ + 'A').map(_.toChar.toString)
+          val retries       = List(1, 2, retryMaxCount, 3)
           for {
-            dones <- ZIO.traverse(Range(0, 4))(_ => Promise.make[Throwable, SqsPublishErrorOrResult])
-            requestEntry0 = SqsRequestEntry(SqsPublishEvent("A"), dones(0), 1)
-            requestEntry1 = SqsRequestEntry(SqsPublishEvent("B"), dones(1), 2)
-            requestEntry2 = SqsRequestEntry(SqsPublishEvent("C"), dones(2), 10)
-            requestEntry3 = SqsRequestEntry(SqsPublishEvent("D"), dones(3), 3)
-            m             = Map("0" -> requestEntry0, "1" -> requestEntry1, "2" -> requestEntry2, "3" -> requestEntry3)
-            resultEntry0  = SendMessageBatchResultEntry.builder().id("0").build()
-            errorEntry1   = BatchResultErrorEntry.builder().id("1").code("ServiceUnavailable").senderFault(false).build()
-            errorEntry2   = BatchResultErrorEntry.builder().id("2").code("ThrottlingException").senderFault(false).build()
-            errorEntry3   = BatchResultErrorEntry.builder().id("3").code("AccessDeniedException").senderFault(false).build()
+            dones          <- ZIO.traverse(Range(0, 4))(_ => Promise.make[Throwable, SqsPublishErrorOrResult])
+            requestEntries = bodies.zip(dones).zip(retries).map { case ((a, b), c) => SqsRequestEntry(SqsPublishEvent(a), b, c) }
+            m              = ids.zip(requestEntries).toMap
+            resultEntry0   = SendMessageBatchResultEntry.builder().id("0").build()
+            errorEntry1    = BatchResultErrorEntry.builder().id("1").code("ServiceUnavailable").senderFault(false).build()
+            errorEntry2    = BatchResultErrorEntry.builder().id("2").code("ThrottlingException").senderFault(false).build()
+            errorEntry3    = BatchResultErrorEntry.builder().id("3").code("AccessDeniedException").senderFault(false).build()
             res = SendMessageBatchResponse
               .builder()
               .successful(resultEntry0)
               .failed(errorEntry1, errorEntry2, errorEntry3)
               .build()
-            partitioner                     = SqsPublisherStream.partitionResponse(m, retryMaxCount) _
-            (successful, retryable, errors) = partitioner(res)
-            mapper = SqsPublisherStream.mapResponse(m) _
+            partitioner                                          = SqsPublisherStream.partitionResponse(m, retryMaxCount) _
+            (successful, retryable, errors)                      = partitioner(res)
+            mapper                                               = SqsPublisherStream.mapResponse(m) _
             (successfulEntries, retryableEntries, errorsEntries) = mapper(successful, retryable, errors)
           } yield {
             assert(successful.toList.size, equalTo(1)) &&
