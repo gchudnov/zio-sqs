@@ -13,11 +13,11 @@ import scala.jdk.CollectionConverters._
 
 object SqsPublisherStream {
 
-  def producer(
+  def producer[R](
     client: SqsAsyncClient,
     queueUrl: String,
     settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
-  ): ZManaged[Clock, Throwable, SqsProducer] = {
+  ): ZManaged[R with Clock, Throwable, SqsProducer] = {
     val eventQueueSize = nextPower2(settings.batchSize * settings.parallelism)
     for {
       eventQueue <- Queue.bounded[SqsRequestEntry](eventQueueSize).toManaged(_.shutdown)
@@ -78,10 +78,10 @@ object SqsPublisherStream {
     SqsRequest(req, entries)
   }
 
-  private[sqs] def runSendMessageBatchRequest(client: SqsAsyncClient, failedQueue: Queue[SqsRequestEntry], retryDelay: Duration, retryMaxCount: Int)(
+  private[sqs] def runSendMessageBatchRequest[R](client: SqsAsyncClient, failedQueue: Queue[SqsRequestEntry], retryDelay: Duration, retryMaxCount: Int)(
     req: SqsRequest
-  ): RIO[Clock, Unit] =
-    RIO.effectAsync[Clock, Unit]({ cb =>
+  ): RIO[R with Clock, Unit] =
+    RIO.effectAsync[R with Clock, Unit]({ cb =>
       client
         .sendMessageBatch(req.inner)
         .handleAsync[Unit](new BiFunction[SendMessageBatchResponse, Throwable, Unit] {

@@ -1,14 +1,14 @@
 package zio.sqs
 
 import software.amazon.awssdk.services.sqs.model.MessageAttributeValue
-import zio.{Promise, Queue, UIO, ZIO, ZManaged}
+import zio.duration._
+import zio.sqs.SqsPublishStreamSpecUtil._
 import zio.sqs.SqsPublisherStream.SqsRequestEntry
 import zio.sqs.ZioSqsMockServer._
-import zio.stream.{Sink, Stream}
+import zio.stream.Sink
 import zio.test.Assertion._
 import zio.test._
-import zio.duration._
-import SqsPublishStreamSpecUtil._
+import zio._
 
 import scala.jdk.CollectionConverters._
 
@@ -79,31 +79,32 @@ object SqsPublishStreamSpec
                        .sample
                        .map(_.value.map(SqsPublishEvent(_)))
                        .run(Sink.await[List[SqsPublishEvent]])
-            reqEntries <- ZIO.traverse(events) { event =>
-              for {
-                done <- Promise.make[Throwable, SqsPublishErrorOrResult]
-              } yield SqsRequestEntry(event, done, 0)
-            }
             server <- serverResource
             client <- clientResource
             retryQueue <- queueResource(1)
-            _ <- server.use { _ =>
+            dones <- server.use { _ =>
               client.use { c =>
                 retryQueue.use { q =>
                   for {
                     _ <- SqsUtils.createQueue(c, queueName)
                     queueUrl <- SqsUtils.getQueueUrl(c, queueName)
+                    reqEntries <- ZIO.traverse(events) { event =>
+                      for {
+                        done <- Promise.make[Throwable, SqsPublishErrorOrResult]
+                      } yield SqsRequestEntry(event, done, 0)
+                    }
                     req = SqsPublisherStream.buildSendMessageBatchRequest(queueUrl, reqEntries)
                     retryDelay = 1.millisecond
                     retryCount = 1
-                    reqSender = SqsPublisherStream.runSendMessageBatchRequest(c, q, retryDelay, retryCount)
+                    reqSender = SqsPublisherStream.runSendMessageBatchRequest(c, q, retryDelay, retryCount) _
                     _ <- reqSender(req)
-                  } yield ()
+                  } yield ZIO.traverse(reqEntries)(entry => entry.done.await)
                 }
               }
             }
+            isAllRight <- dones.map(_.forall(_.isRight))
           } yield {
-            assertM(ZIO.traverse(reqEntries)(entry => entry.done.await).map(_.forall(_.isRight)), equalTo(true))
+            assert(isAllRight, equalTo(true))
           }
         },
         testM("events can be published using a stream") {
@@ -139,7 +140,8 @@ object SqsPublishStreamSpec
 
 object SqsPublishStreamSpecUtil {
 
-  def queueResource(capacity: Int): UIO[ZManaged[Any, Nothing, Queue[SqsRequestEntry]]] = ZIO.succeed(
+  def queueResource(capacity: Int): Task[ZManaged[Any, Throwable, Queue[SqsRequestEntry]]] = Task {
     Queue.bounded[SqsRequestEntry](capacity).toManaged(_.shutdown)
-  )
+  }
+
 }
