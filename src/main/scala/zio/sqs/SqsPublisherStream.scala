@@ -13,7 +13,7 @@ import software.amazon.awssdk.services.sqs.model.{
 import zio.clock.Clock
 import zio.duration.Duration
 import zio.stream.{ Sink, Stream, ZStream }
-import zio.{ IO, Promise, Queue, Schedule, Task, ZIO, ZManaged }
+import zio.{ IO, Promise, Queue, RIO, Schedule, Task, ZIO, ZManaged }
 
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
@@ -100,38 +100,33 @@ object SqsPublisherStream {
     SqsRequest(req, entries)
   }
 
-  private[sqs] def runSendMessageBatchRequest(client: SqsAsyncClient, failedQueue: Queue[SqsRequestEntry], retryDelay: Duration, retryMaxCount: Int)(req: SqsRequest): Task[Unit] =
-    Task.effectAsync[Unit]({ cb =>
+  private[sqs] def runSendMessageBatchRequest(client: SqsAsyncClient, failedQueue: Queue[SqsRequestEntry], retryDelay: Duration, retryMaxCount: Int)(
+    req: SqsRequest
+  ): RIO[Clock, Unit] =
+    RIO.effectAsync[Clock, Unit]({ cb =>
       client
         .sendMessageBatch(req.inner)
         .handleAsync[Unit](new BiFunction[SendMessageBatchResponse, Throwable, Unit] {
           override def apply(res: SendMessageBatchResponse, err: Throwable): Unit =
             err match {
               case null =>
-                val m                               = req.entries.zipWithIndex.map(it => (it._2.toString, it._1)).toMap
+                val m = req.entries.zipWithIndex.map(it => (it._2.toString, it._1)).toMap
 
                 val responseParitioner = partitionResponse(m, retryMaxCount) _
-                val responseMapper = mapResponse(m) _
+                val responseMapper     = mapResponse(m) _
 
                 val (successful, retryable, errors) = responseMapper.tupled(responseParitioner(res))
 
                 val ret = for {
                   _ <- failedQueue.offerAll(retryable).delay(retryDelay).fork
                   _ <- ZIO.traverse(successful)(entry => entry.done.succeed(Right(entry.event): SqsPublishErrorOrResult))
-                  _ <- ZIO.traverse(errors)(entry => entry.done.succeed(Left(SqsPublishEventError(it, entry.event)): SqsPublishErrorOrResult))
+                  _ <- ZIO.traverse(errors)(entry => entry.done.succeed(Left(entry.error): SqsPublishErrorOrResult))
                 } yield ()
 
-                ret.catchAll {
-                  case NonFatal(e) => ZIO.foreach_(req.entries.map(_.done))(_.fail(e))
-                }
-
-                // Left(SqsPublishEventError(it, entry.event)): SqsPublishErrorOrResult
-                //       .map(it => )
-
-                cb(IO.succeed(()))
+                cb(ret)
               case ex =>
-                ZIO.foreach_(req.entries.map(_.done))(_.fail(ex))
-                cb(IO.fail(ex))
+                val ret = ZIO.foreach_(req.entries.map(_.done))(_.fail(ex)) *> RIO.fail(ex)
+                cb(ret)
             }
         })
       ()
