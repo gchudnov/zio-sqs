@@ -8,4 +8,6 @@ final case class SqsPublisherStreamSettings(
   parallelism: Int = 16,
   retryDelay: Duration = 250.millisecond,
   retryMaxCount: Int = 10
-)
+) {
+  require(batchSize <= 10, "up to 10 messages can be buffered and sent as a batch request")
+}
