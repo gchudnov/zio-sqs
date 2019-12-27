@@ -2,6 +2,7 @@ package zio.sqs
 
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicInteger
 
 import software.amazon.awssdk.services.sqs.SqsAsyncClient
 import software.amazon.awssdk.services.sqs.model.{BatchResultErrorEntry, MessageAttributeValue, SendMessageBatchRequest, SendMessageBatchRequestEntry, SendMessageBatchResponse, SendMessageBatchResultEntry}
@@ -14,6 +15,7 @@ import zio.sqs.ZioSqsMockServer._
 import zio.stream.{Sink, Stream}
 import zio.test.Assertion._
 import zio.test._
+import zio.test.mock._
 import zio.test.environment.TestClock
 
 import scala.jdk.CollectionConverters._
@@ -382,7 +384,7 @@ object SqsPublishStreamSpec
             assert(results, equalTo(()))
           }
         },
-        testM("submitted events can succeed and fail (unrecoverable errors)") {
+        testM("submitted events can succeed and fail if there are unrecoverable errors") {
           val queueName = "success-and-unrecoverable-failures-" + UUID.randomUUID().toString
           val queueUrl = s"sqs://${queueName}"
           val settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
@@ -428,6 +430,53 @@ object SqsPublishStreamSpec
             assert(results.size, equalTo(events.size)) &&
             assert(successes, hasSameElements(List("A"))) &&
             assert(failures, hasSameElements(List("B", "C")))
+          }
+        },
+        testM("submitted events can be republished if there are recoverable errors") {
+          val queueName = "success-and-recoverable-failures-" + UUID.randomUUID().toString
+          val queueUrl = s"sqs://${queueName}"
+          val settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
+          val events = List("A", "B", "C").map(SqsPublishEvent(_))
+
+          val invokeCount = new AtomicInteger(0)
+          val client = new SqsAsyncClient {
+            override def serviceName(): String = "test-sqs-async-client"
+            override def close(): Unit = ()
+            override def sendMessageBatch(sendMessageBatchRequest: SendMessageBatchRequest): CompletableFuture[SendMessageBatchResponse] = {
+              invokeCount.incrementAndGet()
+
+              val batchRequestEntries = sendMessageBatchRequest.entries().asScala
+              val (batchRequestEntriesToSucceed, batchRequestEntriesToFail) = batchRequestEntries.splitAt(2)
+
+              val resultEntries = batchRequestEntriesToSucceed.map(entry => {
+                SendMessageBatchResultEntry.builder().id(entry.id()).build()
+              }).toList
+
+              val errorEntries = batchRequestEntriesToFail.map(entry => {
+                BatchResultErrorEntry.builder().id(entry.id()).code("ServiceUnavailable").senderFault(false).build()
+              }).toList
+
+              val res = SendMessageBatchResponse
+                .builder()
+                .successful(resultEntries: _*)
+                .failed(errorEntries: _*)
+                .build()
+
+              CompletableFuture.completedFuture(res)
+            }
+          }
+
+          for {
+            producer <- Task.succeed(SqsPublisherStream.producer(client, queueUrl, settings))
+            results <- producer.use { p => p.produceBatch(events) }.provide(Clock.Live)
+          } yield {
+            val successes = results.filter(_.isRight).collect {
+              case Right(x) => x.body
+            }
+
+            assert(results.size, equalTo(events.size)) &&
+            assert(successes, hasSameElements(List("A", "B", "C"))) &&
+            assert(invokeCount.get(), equalTo(2))
           }
         }
       ),
