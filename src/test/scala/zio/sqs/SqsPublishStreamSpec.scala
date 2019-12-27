@@ -253,7 +253,7 @@ object SqsPublishStreamSpec
             assert(isAllRight, equalTo(true))
           }
         },
-        testM("events can be published using a stream") {
+        testM("events can be published using sendStream") {
           val queueName = "sendStream-" + UUID.randomUUID().toString
           val settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
 
@@ -348,6 +348,35 @@ object SqsPublishStreamSpec
           } yield {
             assert(results.size, equalTo(events.size)) &&
             assert(results.forall(_.isRight), equalTo(true))
+          }
+        },
+        testM("events can be published using sendSink") {
+          val queueName = "sendSink-" + UUID.randomUUID().toString
+          val settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
+          val eventCount = settings.batchSize
+
+          for {
+            events <- Util
+              .listOfStringsN(eventCount)
+              .sample
+              .map(_.value.map(SqsPublishEvent(_)))
+              .run(Sink.await[List[SqsPublishEvent]])
+            server <- serverResource
+            client <- clientResource
+            results <- server.use { _ =>
+              client.use { c =>
+                for {
+                  _ <- SqsUtils.createQueue(c, queueName)
+                  queueUrl <- SqsUtils.getQueueUrl(c, queueName)
+                  producer <- Task.succeed(SqsPublisherStream.producer(c, queueUrl, settings))
+                  results <- producer.use { p =>
+                    Stream.succeed(events).run(p.sendSink)
+                  }
+                } yield results
+              }
+            }
+          } yield {
+            assert(results, equalTo(()))
           }
         }
       ),
