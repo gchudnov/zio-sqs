@@ -381,7 +381,7 @@ object SqsPublishStreamSpec
             assert(results, equalTo(()))
           }
         },
-        test("submitted events can succeed and fail") {
+        test("submitted events can succeed and fail (unrecoverable errors)") {
           val queueName = "success-and-failures-" + UUID.randomUUID().toString
           val settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
           val eventCount = settings.batchSize
@@ -397,7 +397,22 @@ object SqsPublishStreamSpec
               override def serviceName(): String = "test-sqs-async-client"
               override def close(): Unit = ()
               override def sendMessageBatch(sendMessageBatchRequest: SendMessageBatchRequest): CompletableFuture[SendMessageBatchResponse] = {
-                ???
+                val batchRequestEntries = sendMessageBatchRequest.entries().asScala
+                val (batchRequestEntriesToSucceed, batchRequestEntriesToFail) = batchRequestEntries.splitAt(batchRequestEntries.size / 2)
+
+                val resultEntries = batchRequestEntriesToSucceed.map(entry => {
+                  SendMessageBatchResultEntry.builder().id(entry.id()).build()
+                })
+
+                val errorEntries = batchRequestEntriesToFail.map(entry => {
+
+                })
+
+                val res = SendMessageBatchResponse
+                  .builder()
+                  .successful(resultEntry0)
+                  .failed(errorEntry1, errorEntry2, errorEntry3)
+                  .build()
               }
             }
             results <- server.use { _ =>
