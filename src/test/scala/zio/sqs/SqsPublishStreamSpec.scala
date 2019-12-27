@@ -1,7 +1,9 @@
 package zio.sqs
 
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 
+import software.amazon.awssdk.services.sqs.SqsAsyncClient
 import software.amazon.awssdk.services.sqs.model.{BatchResultErrorEntry, MessageAttributeValue, SendMessageBatchRequest, SendMessageBatchRequestEntry, SendMessageBatchResponse, SendMessageBatchResultEntry}
 import zio.{Promise, Queue, Task, ZIO, ZManaged}
 import zio.duration._
@@ -377,6 +379,38 @@ object SqsPublishStreamSpec
             }
           } yield {
             assert(results, equalTo(()))
+          }
+        },
+        test("submitted events can succeed and fail") {
+          val queueName = "success-and-failures-" + UUID.randomUUID().toString
+          val settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
+          val eventCount = settings.batchSize
+
+          for {
+            events <- Util
+              .listOfStringsN(eventCount)
+              .sample
+              .map(_.value.map(SqsPublishEvent(_)))
+              .run(Sink.await[List[SqsPublishEvent]])
+            server <- serverResource
+            c = new SqsAsyncClient {
+              override def serviceName(): String = "test-sqs-async-client"
+              override def close(): Unit = ()
+              override def sendMessageBatch(sendMessageBatchRequest: SendMessageBatchRequest): CompletableFuture[SendMessageBatchResponse] = {
+                ???
+              }
+            }
+            results <- server.use { _ =>
+                for {
+                  _ <- SqsUtils.createQueue(c, queueName)
+                  queueUrl <- SqsUtils.getQueueUrl(c, queueName)
+                  producer <- Task.succeed(SqsPublisherStream.producer(c, queueUrl, settings))
+                  results <- producer.use { p => p.produceBatch(events) }
+                } yield results
+            }
+          } yield {
+            assert(results.size, equalTo(events.size)) &&
+            assert(results.forall(_.isRight), equalTo(true))
           }
         }
       ),
