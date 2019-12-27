@@ -96,7 +96,7 @@ object SqsPublisherStream {
                 val (successful, retryable, errors) = responseMapper.tupled(responseParitioner(res))
 
                 val ret = for {
-                  _ <- failedQueue.offerAll(retryable).delay(retryDelay).fork
+                  _ <- failedQueue.offerAll(retryable.map(it => it.copy(retryCount = it.retryCount + 1))).delay(retryDelay).fork
                   _ <- ZIO.traverse(successful)(entry => entry.done.succeed(Right(entry.event): SqsPublishErrorOrResult))
                   _ <- ZIO.traverse(errors)(entry => entry.done.succeed(Left(entry.error): SqsPublishErrorOrResult))
                 } yield ()
