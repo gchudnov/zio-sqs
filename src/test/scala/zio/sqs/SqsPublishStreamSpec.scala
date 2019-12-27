@@ -217,9 +217,11 @@ object SqsPublishStreamSpec
         },
         testM("runSendMessageBatchRequest can be executed") {
           val queueName = "runSendMessageBatchRequest-" + UUID.randomUUID().toString
+          val settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
+          val eventCount = settings.batchSize
           for {
             events <- Util
-                       .listOfStringsN(10)
+                       .listOfStringsN(eventCount)
                        .sample
                        .map(_.value.map(SqsPublishEvent(_)))
                        .run(Sink.await[List[SqsPublishEvent]])
@@ -255,7 +257,7 @@ object SqsPublishStreamSpec
           val queueName = "sendStream-" + UUID.randomUUID().toString
           val settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
 
-          val eventCount = 23
+          val eventCount = (settings.batchSize * 2) + 3
           val eventsInFullBatches = (eventCount / settings.batchSize) * settings.batchSize
           val eventsInPartialBatches = eventCount - eventsInFullBatches
 
@@ -289,6 +291,64 @@ object SqsPublishStreamSpec
             assert(results.size, equalTo(events.size)) &&
             assert(results.forall(_.isRight), equalTo(true))
           }
+        },
+        testM("events can be published using produce") {
+          val queueName = "produce-" + UUID.randomUUID().toString
+          val settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
+          val eventCount = settings.batchSize
+
+          for {
+            events <- Util
+              .listOfStringsN(eventCount)
+              .sample
+              .map(_.value.map(SqsPublishEvent(_)))
+              .run(Sink.await[List[SqsPublishEvent]])
+            server <- serverResource
+            client <- clientResource
+            results <- server.use { _ =>
+              client.use { c =>
+                for {
+                  _ <- SqsUtils.createQueue(c, queueName)
+                  queueUrl <- SqsUtils.getQueueUrl(c, queueName)
+                  producer <- Task.succeed(SqsPublisherStream.producer(c, queueUrl, settings))
+                  results <- producer.use { p =>
+                    ZIO.traversePar(events)(event => p.produce(event))
+                  }
+                } yield results
+              }
+            }
+          } yield {
+            assert(results.size, equalTo(events.size)) &&
+            assert(results.forall(_.isRight), equalTo(true))
+          }
+        },
+        testM("events can be published using produceBatch") {
+          val queueName = "produceBatch-" + UUID.randomUUID().toString
+          val settings: SqsPublisherStreamSettings = SqsPublisherStreamSettings()
+          val eventCount = settings.batchSize * 2
+
+          for {
+            events <- Util
+              .listOfStringsN(eventCount)
+              .sample
+              .map(_.value.map(SqsPublishEvent(_)))
+              .run(Sink.await[List[SqsPublishEvent]])
+            server <- serverResource
+            client <- clientResource
+            results <- server.use { _ =>
+              client.use { c =>
+                for {
+                  _ <- SqsUtils.createQueue(c, queueName)
+                  queueUrl <- SqsUtils.getQueueUrl(c, queueName)
+                  producer <- Task.succeed(SqsPublisherStream.producer(c, queueUrl, settings))
+                  results <- producer.use { p => p.produceBatch(events) }
+                } yield results
+              }
+            }
+          } yield {
+            assert(results.size, equalTo(events.size)) &&
+            assert(results.forall(_.isRight), equalTo(true))
+          }
         }
       ),
       List(TestAspect.executionStrategy(ExecutionStrategy.Sequential))
@@ -299,7 +359,5 @@ object SqsPublishStreamSpecUtil {
   def queueResource(capacity: Int): Task[ZManaged[Any, Throwable, Queue[SqsRequestEntry]]] = Task.succeed {
     Queue.bounded[SqsRequestEntry](capacity).toManaged(_.shutdown)
   }
-
-
 
 }
